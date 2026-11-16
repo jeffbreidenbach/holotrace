@@ -1,0 +1,49 @@
+# holotrace
+
+Computed off-axis (Leith–Upatnieks) holograms of ray-traced scenes, with
+the subject on the image plane: on and around the plate.
+
+The aim is the best hologram a computer can make, the test being that
+optics in the scene still work: look through a recorded magnifying glass,
+and what is behind it is magnified, sharp, and changes as you move.
+
+## How it works
+
+The hologram is an exact coherent sum, not a stereogram or hogels, which
+blur fine angular detail. Each point of the scene sends a wave to every
+point of the plate it can reach; the plate records their sum against a
+reference beam.
+
+1. **Ray tracing ([Mitsuba 3](https://www.mitsuba-renderer.org/)).** For
+   each point of the scene: whether it can be seen from each direction,
+   how bright it is that way, and, where its light passes through lenses
+   or off mirrors, how long the light's path is (which sets its phase).
+2. **Coherent sum.** For each tile of the plate, add up every point's
+   wave: brightness × visibility × e^(ik·path length) / distance.
+3. **Output.** Add the reference beam, encode the fringes (binary or
+   grayscale), and write tiles for the printer.
+
+A simulated eye, with a real pupil and focus, looks at the result to
+check it before anything is printed.
+
+## Plan
+
+1. A tiny analytic test, no renderer: a fine pattern behind a lens, a
+   plate a few millimetres across, and the simulated eye. It passes if the
+   pattern looks magnified and sharp, and the magnification changes as the
+   eye moves.
+2. The same test with the scene traced by Mitsuba.
+3. Scale up: tiling, real meshes from Blender, a car part, then a car.
+4. Choose the output medium, which fixes the pixel pitch and encoding.
+
+## Running
+
+```
+uv run holotrace
+```
+
+checks that Mitsuba works and can measure how far rays go.
+
+Mitsuba runs on the GPU only on NVIDIA cards of compute capability 7.5 or
+newer (Turing onward); on older cards and other machines it runs on the
+CPU, more slowly.
