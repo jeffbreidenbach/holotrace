@@ -32,7 +32,6 @@ from pathlib import Path
 
 import numpy as np
 
-from .eye import Eye
 from .magnifier import CONE, PLATE, PUPIL, WAVELENGTH, picture, replay, sheet
 
 # Lengths in micrometres.
@@ -50,7 +49,6 @@ NEAREST = 2.0
 VIEWS = {"straight on": (0.0, 0.0), "from the right": (0.06, 0.0)}
 FOCUS = {"on the ball's front": -150.0, "on the wall": -WALL_Z}
 
-OUT = Path("out/solid")
 
 
 def ball():
@@ -72,14 +70,15 @@ def ball():
     return points, normals, albedo, np.full(len(points), GLOSS)
 
 
-def wall():
-    """Points on a grid over the wall, checkered."""
-    g = np.arange(-WALL_HALF, WALL_HALF + SPACING / 2, SPACING)
+def wall(z=WALL_Z, half=WALL_HALF, light=1.0, dark=0.25):
+    """Points on a grid over a wall at z, `half` either way, checkered
+    `light` and `dark`."""
+    g = np.arange(-half, half + SPACING / 2, SPACING)
     x, y = (a.ravel() for a in np.meshgrid(g, g))
-    points = np.column_stack([x, y, np.full(len(x), WALL_Z)])
+    points = np.column_stack([x, y, np.full(len(x), z)])
     normals = np.tile([0.0, 0.0, 1.0], (len(x), 1))
     check = (np.floor(x / CHECK) + np.floor(y / CHECK)).astype(int) % 2
-    albedo = np.where(check == 0, 1.0, 0.25)
+    albedo = np.where(check == 0, light, dark)
     return points, normals, albedo, np.zeros(len(x))
 
 
@@ -104,6 +103,10 @@ def _blocked(world, origins, directions):
     """Whether anything is in the way of rays from `origins` along
     `directions` (both N x 3)."""
     import mitsuba as mi
+
+    # Dr.Jit fails on empty arrays, rather than doing nothing.
+    if len(origins) == 0:
+        return np.zeros(0, bool)
 
     def vec(cls, a):
         a = np.ascontiguousarray(a, np.float32)
@@ -151,18 +154,23 @@ def maps(world, points, normals, albedo, gloss, chunk=4000):
     return out.reshape(len(points), MAP, MAP)
 
 
-def main():
+def render(name, parts, world, focus):
+    """Makes the hologram of a scene and the eye's views of it, into
+    out/<name>: `parts` maps a name to each part's points, normals,
+    albedo and gloss (see ball and wall), `world` is the scene as Mitsuba
+    sees it, and `focus` maps a name to each depth the eye focuses at.
+    Saves the plate's light, lit by the reference beam again (replay.npy,
+    for the viewer), and a sheet of views (views.png)."""
     import cupy as cp
 
-    from .gpu import GpuPlate
+    from .gpu import GpuEye, GpuPlate, SeenPoints
 
-    OUT.mkdir(parents=True, exist_ok=True)
+    out = Path("out") / name
+    out.mkdir(parents=True, exist_ok=True)
     start = time.time()
-    parts = [ball(), wall()]
-    points, normals, albedo, gloss = (np.concatenate(a) for a in zip(*parts))
-    print(f"{len(points)} points: {len(parts[0][0])} on the ball, {len(parts[1][0])} on the wall", flush=True)
-
-    world = scene()
+    points, normals, albedo, gloss = (np.concatenate(a) for a in zip(*parts.values()))
+    counts = ", ".join(f"{len(p[0])} on the {k}" for k, p in parts.items())
+    print(f"{len(points)} points: {counts}", flush=True)
     light = maps(world, points, normals, albedo, gloss)
     alive = (light.max(axis=(1, 2)) > 0) & (np.abs(points[:, 2]) >= NEAREST)
     print(
@@ -175,19 +183,24 @@ def main():
     rng = np.random.default_rng(1)
     phases = rng.uniform(0, 2 * math.pi, len(points))
     plate = GpuPlate(**PLATE)
-    on_gpu = cp.asarray(light[alive])
-    for i, (point, phase) in enumerate(zip(points[alive], phases[alive])):
-        plate.add_seen(point, phase, CONE, on_gpu, i)
+    seen = SeenPoints(**PLATE, points=points[alive], maps=cp.asarray(light[alive]), cone=CONE)
+    plate.light = seen.light(phases[alive])
     cp.cuda.Device().synchronize()
     plate.finish()
     print(f"summed on {plate.size}^2 pixels on the GPU: {time.time() - start:.1f} s", flush=True)
 
     start = time.time()
-    eye = Eye(replay(plate), plate.pitch, WAVELENGTH)
+    lit = replay(plate).astype(np.complex64)
+    np.save(out / "replay.npy", lit)
+    eye = GpuEye(lit, plate.pitch, WAVELENGTH)
     tiles = []
     for where, direction in VIEWS.items():
-        for focus, depth in FOCUS.items():
+        for label, depth in focus.items():
             view = eye.view(direction, PUPIL, depth)
-            tiles.append((f"looking {where}, focused {focus}", picture(view, plate.pitch, half=900)))
-    sheet(tiles).save(OUT / "views.png")
-    print(f"eye's views: {time.time() - start:.1f} s; wrote {OUT}/views.png")
+            tiles.append((f"looking {where}, focused {label}", picture(view, plate.pitch, half=900)))
+    sheet(tiles).save(out / "views.png")
+    print(f"eye's views: {time.time() - start:.1f} s; wrote {out}/views.png and replay.npy")
+
+
+def main():
+    render("solid", {"ball": ball(), "wall": wall()}, scene(), FOCUS)

@@ -10,6 +10,12 @@ Mitsuba traces the scene; the waves are summed separately.
                           Mitsuba, against the exact one
     holotrace solid       step 3: a solid scene across the plate, hidden
                           surfaces and shadows from Mitsuba (GPU only)
+    holotrace benchy      3DBenchy, the 3D printing test boat, as in step 3
+    holotrace view NAME   a movie of the eye moving and refocusing, from
+                          out/NAME/replay.npy (from solid or benchy)
+    holotrace speckle     step 4: the solid scene with each point's phase
+                          optimized against speckle (GPU only; --check
+                          checks its gradient)
     holotrace gpucheck    checks the GPU's sum against the CPU's
 
 Add --gpu to magnifier or mesh to sum the light on an NVIDIA GPU.
@@ -72,6 +78,18 @@ def main() -> None:
         from .solid import main as solid
 
         solid()
+    elif command == "benchy":
+        from .benchy import main as benchy
+
+        benchy()
+    elif command == "view":
+        from .viewer import main as view
+
+        view()
+    elif command == "speckle":
+        from .speckle import main as speckle
+
+        speckle()
     elif command == "gpucheck":
         from .gpucheck import main as gpucheck
 

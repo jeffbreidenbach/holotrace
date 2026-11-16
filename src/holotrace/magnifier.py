@@ -253,14 +253,15 @@ def main(gpu=False):
     print(f"wrote {OUT}/views.png")
 
 
-def sheet(tiles):
-    """The views two by two, each labelled."""
+def sheet(tiles, columns=2):
+    """The views in rows of `columns`, each labelled."""
     w, h = tiles[0][1].size
     label = 22
-    out = Image.new("L", (2 * w + 10, 2 * (h + label) + 10), 40)
+    rows = math.ceil(len(tiles) / columns)
+    out = Image.new("L", (columns * (w + 10) - 10, rows * (h + label + 10) - 10), 40)
     draw = ImageDraw.Draw(out)
     for i, (text, img) in enumerate(tiles):
-        x, y = (i % 2) * (w + 10), (i // 2) * (h + label + 10)
+        x, y = (i % columns) * (w + 10), (i // columns) * (h + label + 10)
         draw.text((x + 4, y + 4), text, fill=230)
         out.paste(img, (x, y + label))
     return out
