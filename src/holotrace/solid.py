@@ -162,7 +162,7 @@ def maps(world, points, normals, albedo, gloss, chunk=4000, shadows=True):
 
 
 # The plate is worked out a tile this many pixels square at a time.
-TILE = 4096
+TILE = 8192
 # What the eye can see of the plate's light is the light within CONE,
 # which needs a sample only every KEEP pixels (at 0.5 um, every 2 um:
 # enough for directions to a sine of 0.158). Each tile is worked out
@@ -212,25 +212,36 @@ def sum_planes(points, light, phases, size, slab=SLAB):
         slice_ = np.where(depth >= 0, np.floor(depth / slab), -np.floor(-depth / slab)).astype(int)
     else:
         slice_ = np.zeros(len(points), int)
+    # The points near the plate are summed at the plate's own pixels, the
+    # deep ones on their planes at the kept ones, every KEEP pixels: their
+    # light there is all within CONE, which needs no finer, and points
+    # are at least CLEAR from their plane, so it lands on many of them.
+    # The kept pixels are every KEEP-th of the plate's, from the first:
+    # a grid of the bigger pixels about the same middle would sit
+    # (KEEP - 1) / 2 of the plate's pixels off them, so the deep points
+    # are moved by as much to make up for it.
+    coarse = dict(PLATE, size=size // KEEP, pitch=pitch * KEEP)
+    shift = (KEEP - 1) / 2 * pitch
     # Each group: its plane's distance behind the plate (0: the plate
-    # itself), its points' indices, their positions as seen from the
-    # plane, the margin light spreads by, and their windows (in pixels).
+    # itself), its grid, its points' indices, their positions as seen from
+    # the plane, the margin light spreads by (in the grid's pixels), and
+    # their windows.
     groups = []
     for k in sorted(set(slice_)):
         mine = np.flatnonzero(slice_ == k)
         plane = 0.0 if k == 0 else np.sign(k) * (abs(k) * slab - CLEAR)
-        seen_from = points[mine] + [0.0, 0.0, plane]
-        margin = 0 if k == 0 else int(math.ceil(CONE * abs(plane) / pitch)) + 32
+        grid = dict(PLATE, size=size) if k == 0 else coarse
+        p, n = grid["pitch"], grid["size"]
+        seen_from = points[mine] + [0.0 if k == 0 else shift, 0.0 if k == 0 else shift, plane]
+        margin = 0 if k == 0 else int(math.ceil(CONE * abs(plane) / p)) + 8
         px, py, pz = seen_from.T
         r = CONE * np.abs(pz)
         bounds = (
-            np.floor((px - r) / pitch + size / 2), np.ceil((px + r) / pitch + size / 2) + 1,
-            np.floor((py - r) / pitch + size / 2), np.ceil((py + r) / pitch + size / 2) + 1,
+            np.floor((px - r) / p + n / 2), np.ceil((px + r) / p + n / 2) + 1,
+            np.floor((py - r) / p + n / 2), np.ceil((py + r) / p + n / 2) + 1,
         )
-        groups.append((plane, mine, seen_from, margin, bounds))
+        groups.append((plane, grid, mine, seen_from, margin, bounds))
 
-    # What is kept: the light every KEEP pixels (see _keep), worked out
-    # with a border of BORDER pixels round each tile, so that it can be.
     kept = np.zeros((size // KEEP, size // KEEP), np.complex64)
     b = BORDER
     tiles, done, start = (-(-size // TILE)) ** 2, 0, time.time()
@@ -238,23 +249,34 @@ def sum_planes(points, light, phases, size, slab=SLAB):
     for y0 in range(0, size, TILE):
         for x0 in range(0, size, TILE):
             th, tw = min(TILE, size - y0), min(TILE, size - x0)
-            tile = cp.zeros((th + 2 * b, tw + 2 * b), cp.complex64)
-            for plane, mine, seen_from, m, (lo_x, hi_x, lo_y, hi_y) in groups:
-                ox, oy, w, h = x0 - b - m, y0 - b - m, tw + 2 * (b + m), th + 2 * (b + m)
+            # The plate's pixels near the plate, with a border of BORDER so
+            # that they can be cut down to the kept ones (see _keep); the
+            # kept ones from the deep planes.
+            fine = cp.zeros((th + 2 * b, tw + 2 * b), cp.complex64)
+            deep = cp.zeros((th // KEEP, tw // KEEP), cp.complex64)
+            for plane, grid, mine, seen_from, m, (lo_x, hi_x, lo_y, hi_y) in groups:
+                if plane == 0:
+                    ox, oy, w, h = x0 - b, y0 - b, tw + 2 * b, th + 2 * b
+                else:
+                    ox, oy, w, h = x0 // KEEP - m, y0 // KEEP - m, tw // KEEP + 2 * m, th // KEEP + 2 * m
                 near = (hi_x > ox) & (lo_x < ox + w) & (hi_y > oy) & (lo_y < oy + h)
                 if not near.any():
                     continue
                 which = mine[near]
-                seen = SeenPoints(**dict(PLATE, size=size), points=seen_from[near], maps=cp.asarray(light[which]),
+                seen = SeenPoints(**grid, points=seen_from[near], maps=cp.asarray(light[which]),
                                   cone=CONE, tile=(ox, oy, w, h))
                 patch = seen.light(phases[which])
-                tile += patch if plane == 0 else _carry(patch, plane, m)
+                if plane == 0:
+                    fine += patch
+                else:
+                    deep += _carry(patch, plane, m, grid["pitch"])
                 del seen, patch
                 # Each slab's patch is a different size; the GPU memory
                 # kept for reuse would otherwise pile up.
                 cp.get_default_memory_pool().free_all_blocks()
-            kept[y0 // KEEP : (y0 + th) // KEEP, x0 // KEEP : (x0 + tw) // KEEP] = cp.asnumpy(_keep(tile, b))
-            del tile
+            out = _keep(fine, b) + deep
+            kept[y0 // KEEP : (y0 + th) // KEEP, x0 // KEEP : (x0 + tw) // KEEP] = cp.asnumpy(out)
+            del fine, deep, out
             cp.get_default_memory_pool().free_all_blocks()
             done += 1
             if done % report == 0 and done < tiles:
@@ -277,10 +299,10 @@ def _keep(tile, border):
     return small[k : small.shape[0] - k, k : small.shape[1] - k]
 
 
-def _carry(patch, distance, margin):
-    """The light a patch of a recording plane (on the GPU), `distance`
-    behind the plate (in front, if negative), sends the tile `margin`
-    pixels in from its edges: each of its plane waves moved on by its own
+def _carry(patch, distance, margin, pitch=PLATE["pitch"]):
+    """The light a patch of a recording plane (on the GPU, its pixels
+    `pitch` apart), `distance` behind the plate (in front, if negative),
+    sends the tile `margin` pixels in from its edges: each of its plane waves moved on by its own
     phase (the angular spectrum method), keeping only those within CONE,
     as all the scene's light is, and within what the sampling can carry
     without aliasing (band-limited, after Matsushima). The margin is as
@@ -291,15 +313,22 @@ def _carry(patch, distance, margin):
     import cupy as cp
     import cupyx.scipy.fft as cufft
 
+    # Padded to sizes the FFT handles well (small prime factors): others
+    # take it far more memory.
     h, w = patch.shape
-    pitch, lam = PLATE["pitch"], WAVELENGTH
-    fx = cp.fft.fftfreq(w, pitch).astype(cp.float32)[None, :]
-    fy = cp.fft.fftfreq(h, pitch).astype(cp.float32)
-    limit_x = 1 / (lam * math.sqrt((2 * distance / (w * pitch)) ** 2 + 1))
-    limit_y = 1 / (lam * math.sqrt((2 * distance / (h * pitch)) ** 2 + 1))
+    ph, pw = cufft.next_fast_len(h), cufft.next_fast_len(w)
+    if (ph, pw) != (h, w):
+        padded = cp.zeros((ph, pw), cp.complex64)
+        padded[:h, :w] = patch
+        patch = padded
+    lam = WAVELENGTH
+    fx = cp.fft.fftfreq(pw, pitch).astype(cp.float32)[None, :]
+    fy = cp.fft.fftfreq(ph, pitch).astype(cp.float32)
+    limit_x = 1 / (lam * math.sqrt((2 * distance / (pw * pitch)) ** 2 + 1))
+    limit_y = 1 / (lam * math.sqrt((2 * distance / (ph * pitch)) ** 2 + 1))
     spectrum = cufft.fft2(patch, overwrite_x=True)
     del patch
-    for r in range(0, h, 1024):
+    for r in range(0, ph, 1024):
         y = fy[r : r + 1024, None]
         s2 = (fx * fx + y * y) * lam * lam
         keep = (s2 < CONE**2 / (1 + CONE**2)) & (cp.abs(fx) < limit_x) & (cp.abs(y) < limit_y)
