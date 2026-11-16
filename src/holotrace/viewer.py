@@ -4,8 +4,8 @@ sheet comparing scenes and light.
     holotrace view NAME [--pupil P] [--focus DEPTH] [--light laser|led]
                         [--eye MM [--pupil-mm MM]]
 
-reads the spectrum of the plate's light, lit by the reference beam
-again, saved by a scene (out/NAME/spectrum.npy; see solid.render), and
+reads the spectrum of the plate's light, as the hologram sends it out,
+saved by a scene (out/NAME/spectrum.npy; see solid.render), and
 writes out/NAME/
 movie-<light>.mp4 (with ffmpeg; speckle makes GIFs huge). First the eye
 moves from left to right and back, then from below to above and back,
@@ -33,6 +33,7 @@ smooths speckle, the more so the farther from the plate, and blurs by
 as much.
 """
 
+import json
 import math
 import subprocess
 import sys
@@ -41,6 +42,7 @@ import time
 from pathlib import Path
 
 import cupy as cp
+import cupyx.scipy.fft as cufft
 import numpy as np
 from PIL import Image, ImageDraw
 
@@ -59,23 +61,32 @@ class Look:
 
     The eye takes in only the light leaving within its pupil's small cone
     of directions: a small patch of the light's spectrum (its plane
-    waves). So the spectrum of the plate's light, as lit by the reference
-    beam it was made for, is worked out once, and each view from just the
-    patch its pupil takes in: about 1000 x 1000 for a 1 cm plate, however
-    many pixels the plate has. A different wavelength or direction of the
-    light shifts the spectrum, so the patch is taken from a little
-    elsewhere. Each view covers the whole plate, at about half the eye's
-    resolution."""
+    waves). So the spectrum of the plate's light (the scene's light, as
+    the hologram sends it out lit by the reference beam it was made for),
+    sampled `pitch` um apart, is worked out once, and each view from just
+    the patch its pupil takes in: a few hundred square for a 1 cm plate,
+    however many pixels the plate has. Another wavelength or direction of
+    light shifts the spectrum (as the hologram's fringes, made for the
+    reference beam, bend it differently), so the patch is taken from a
+    little elsewhere. Each view covers the whole plate, at about half the
+    eye's resolution."""
 
-    def __init__(self, spectrum, light=LASER):
+    def __init__(self, spectrum, pitch, light=LASER):
         self.spectrum = spectrum
         self.light = light
         self.n = spectrum.shape[0]
-        self.width = self.n * PLATE["pitch"]
+        self.width = self.n * pitch
+
+    @staticmethod
+    def save(path, spectrum, pitch):
+        """Saves a spectrum, and beside it how far apart its samples are."""
+        np.save(path, spectrum)
+        Path(path).with_suffix(".json").write_text(json.dumps({"pitch": pitch}))
 
     @classmethod
     def load(cls, path, light=LASER):
-        return cls(np.load(path, mmap_mode="r"), light)
+        pitch = json.loads(Path(path).with_suffix(".json").read_text())["pitch"]
+        return cls(np.load(path, mmap_mode="r"), pitch, light)
 
     def view(self, direction, pupil, depth):
         """The brightness across the plane `depth` behind the plate, seen
@@ -98,11 +109,13 @@ class Look:
             cos = cp.sqrt(cp.maximum(0, 1 - sx * sx - sy * sy))
             patch = patch * seen * cp.exp((-2j * math.pi / lam) * cos * depth).astype(cp.complex64)
             # Twice as many samples as the patch, so the view is smooth.
-            size = 1 << int(math.ceil(math.log2(4 * m + 2)))
+            size = cufft.next_fast_len(4 * m + 2)
             padded = cp.zeros((size, size), cp.complex64)
             c = size // 2
             padded[c - m : c + m + 1, c - m : c + m + 1] = patch
-            total = total + cp.abs(cp.fft.ifft2(cp.fft.ifftshift(padded))) ** 2
+            total = total + cp.abs(cufft.ifft2(cp.fft.ifftshift(padded), overwrite_x=True)) ** 2
+            del padded, patch
+        cp.get_default_memory_pool().free_all_blocks()
         return cp.asnumpy(total / len(self.light))
 
     def eye_view(self, eye, pupil, depth, grid=9):
@@ -187,7 +200,7 @@ def main():
     out = Path("out") / name
     start = time.time()
     look = Look.load(out / "spectrum.npy", LIGHTS[light])
-    depths = np.linspace(-400, 900, 27) * look.n / PLATE["size"]
+    depths = np.linspace(-400, 900, 27) * look.width / (PLATE["size"] * PLATE["pitch"])
 
     if distance:
         # A real eye, `distance` mm away, its pupil `--pupil-mm` across,
