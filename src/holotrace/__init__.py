@@ -13,7 +13,7 @@ Mitsuba traces the scene; the waves are summed separately.
     holotrace benchy      3DBenchy, the 3D printing test boat, as in step 3
                           (--scale S, --spacing D: see benchy.py)
     holotrace view NAME   a movie of the eye moving and refocusing, from
-                          out/NAME/replay.npy (from solid or benchy;
+                          out/NAME/spectrum.npy (from solid or benchy;
                           --light laser or led: see viewer.py)
     holotrace compare NAME...
                           the scenes side by side, by laser and by LED

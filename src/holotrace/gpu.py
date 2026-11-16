@@ -256,9 +256,11 @@ __device__ bool tile_pixel(
 }
 
 // `seen` for every point: adds their light into `light` (interleaved
-// real, imaginary), atomically, since windows overlap.
+// real, imaginary), atomically, since windows overlap. `light` is the
+// part of the plate from pixel (ox, oy), `width` pixels across; the
+// points' windows lie within it.
 extern "C" __global__ void seen_many(
-    float* light, int size, float pitch, float k, float cone,
+    float* light, int size, int ox, int oy, int width, float pitch, float k, float cone,
     int count, const int* start, const int* x0, const int* y0, const int* nx, const int* ny,
     const float* px, const float* py, const float* depth, const float* phase,
     const float* maps, int n)
@@ -269,14 +271,14 @@ extern "C" __global__ void seen_many(
     complex<float> v;
     if (!seen_at(col, row, size, pitch, k, px[j], py[j], depth[j], phase[j], cone,
                  maps + (size_t)j * n * n, n, &v)) return;
-    int at = 2 * (row * size + col);
+    int at = 2 * ((row - oy) * width + (col - ox));
     atomicAdd(light + at, v.real());
     atomicAdd(light + at + 1, v.imag());
 }
 
 // `seen_reverse` for every point, into out (2 per point).
 extern "C" __global__ void seen_reverse_many(
-    const complex<float>* grad, int size, float pitch, float k, float cone,
+    const complex<float>* grad, int size, int ox, int oy, int width, float pitch, float k, float cone,
     int count, const int* start, const int* x0, const int* y0, const int* nx, const int* ny,
     const float* px, const float* py, const float* depth, const float* phase,
     const float* maps, int n, float* out)
@@ -290,7 +292,7 @@ extern "C" __global__ void seen_reverse_many(
         complex<float> v;
         if (seen_at(col, row, size, pitch, k, px[j], py[j], depth[j], phase[j], cone,
                     maps + (size_t)j * n * n, n, &v)) {
-            complex<float> g = grad[row * size + col];
+            complex<float> g = grad[(row - oy) * width + (col - ox)];
             r = v.real() * g.real() + v.imag() * g.imag();
             m = v.real() * g.imag() - v.imag() * g.real();
         }
@@ -458,20 +460,23 @@ class SeenPoints:
     """Many points' light, as GpuPlate.add_seen sums it, but all in one
     GPU launch: launching one per point costs far more than the sum.
     The points and their maps (on the GPU: one n x n map each) are fixed;
-    their phases are given each time."""
+    their phases are given each time. With `tile` (x, y, width, height,
+    in pixels), only that part of the plate is worked out."""
 
-    def __init__(self, size, pitch, wavelength, points, maps, cone):
+    def __init__(self, size, pitch, wavelength, points, maps, cone, tile=None):
         self.size, self.pitch, self.cone = size, pitch, cone
+        self.tile = tile or (0, 0, size, size)
+        ox, oy, tw, th = self.tile
         self.k = 2 * math.pi / wavelength
         self.maps = maps
         px, py, pz = (np.asarray(a, float) for a in np.asarray(points).T)
         self.depth = -pz
         # Each point's window, as Plate.window has it.
         r = cone * np.abs(self.depth)
-        lo_x = np.clip(np.floor((px - r) / pitch + size / 2), 0, size).astype(np.int64)
-        hi_x = np.clip(np.ceil((px + r) / pitch + size / 2) + 1, 0, size).astype(np.int64)
-        lo_y = np.clip(np.floor((py - r) / pitch + size / 2), 0, size).astype(np.int64)
-        hi_y = np.clip(np.ceil((py + r) / pitch + size / 2) + 1, 0, size).astype(np.int64)
+        lo_x = np.clip(np.floor((px - r) / pitch + size / 2), ox, ox + tw).astype(np.int64)
+        hi_x = np.clip(np.ceil((px + r) / pitch + size / 2) + 1, ox, ox + tw).astype(np.int64)
+        lo_y = np.clip(np.floor((py - r) / pitch + size / 2), oy, oy + th).astype(np.int64)
+        hi_y = np.clip(np.ceil((py + r) / pitch + size / 2) + 1, oy, oy + th).astype(np.int64)
         nx, ny = np.maximum(hi_x - lo_x, 0), np.maximum(hi_y - lo_y, 0)
         tiles = -(-nx // _BLOCK[0]) * -(-ny // _BLOCK[1])
         start = np.concatenate([[0], np.cumsum(tiles)])
@@ -491,11 +496,14 @@ class SeenPoints:
     def light(self, phases):
         """Their light on the plate (on the GPU), each starting with its
         phase."""
-        light = cp.zeros((self.size, self.size), cp.complex64)
-        f32 = np.float32
+        ox, oy, tw, th = self.tile
+        light = cp.zeros((th, tw), cp.complex64)
+        f32, i32 = np.float32, np.int32
+        if self.blocks == 0:
+            return light
         _kernel("seen_many")(
             (self.blocks,), _BLOCK,
-            (light, np.int32(self.size), f32(self.pitch), f32(self.k), f32(self.cone),
+            (light, i32(self.size), i32(ox), i32(oy), i32(tw), f32(self.pitch), f32(self.k), f32(self.cone),
              *self._args, self._phase(phases), self.maps, np.int32(self.maps.shape[1])),
         )
         return light
@@ -505,10 +513,11 @@ class SeenPoints:
         conjugated, times `grad` (on the GPU), summed."""
         count = int(self._args[0])
         out = cp.zeros(2 * count, cp.float32)
-        f32 = np.float32
+        ox, oy, tw, th = self.tile
+        f32, i32 = np.float32, np.int32
         _kernel("seen_reverse_many")(
             (self.blocks,), _BLOCK,
-            (grad, np.int32(self.size), f32(self.pitch), f32(self.k), f32(self.cone),
+            (grad, i32(self.size), i32(ox), i32(oy), i32(tw), f32(self.pitch), f32(self.k), f32(self.cone),
              *self._args, self._phase(np.zeros(count)), self.maps, np.int32(self.maps.shape[1]), out),
         )
         out = cp.asnumpy(out)

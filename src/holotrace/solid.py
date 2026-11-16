@@ -32,7 +32,7 @@ from pathlib import Path
 
 import numpy as np
 
-from .magnifier import CONE, PLATE, PUPIL, WAVELENGTH, picture, replay, sheet
+from .magnifier import CONE, PLATE, PUPIL, REFERENCE, WAVELENGTH, sheet
 
 # Lengths in micrometres.
 BALL_Z, BALL_RADIUS = -150.0, 350.0
@@ -154,17 +154,66 @@ def maps(world, points, normals, albedo, gloss, chunk=4000):
     return out.reshape(len(points), MAP, MAP)
 
 
+# Plates wider than this are summed a tile at a time (see sum_tiled).
+TILE = 4096
+
+
+def sum_tiled(points, light, phases, size):
+    """The plate's light (in main memory), `size` pixels square, from
+    `points` with their brightness maps `light` and starting `phases`,
+    summed on the GPU a TILE square at a time: each tile with only the
+    points whose light reaches it. Each pixel's light is its own sum over
+    the points, so this is exact."""
+    import cupy as cp
+
+    from .gpu import SeenPoints
+
+    pitch = PLATE["pitch"]
+    plate = np.zeros((size, size), np.complex64)
+    px, py, pz = points.T
+    r = CONE * np.abs(pz)
+    lo_x, hi_x = np.floor((px - r) / pitch + size / 2), np.ceil((px + r) / pitch + size / 2) + 1
+    lo_y, hi_y = np.floor((py - r) / pitch + size / 2), np.ceil((py + r) / pitch + size / 2) + 1
+    for y0 in range(0, size, TILE):
+        for x0 in range(0, size, TILE):
+            tw, th = min(TILE, size - x0), min(TILE, size - y0)
+            near = (hi_x > x0) & (lo_x < x0 + tw) & (hi_y > y0) & (lo_y < y0 + th)
+            if not near.any():
+                continue
+            seen = SeenPoints(**dict(PLATE, size=size), points=points[near], maps=cp.asarray(light[near]),
+                              cone=CONE, tile=(x0, y0, tw, th))
+            plate[y0 : y0 + th, x0 : x0 + tw] = cp.asnumpy(seen.light(phases[near]))
+            del seen
+            cp.get_default_memory_pool().free_all_blocks()
+    return plate
+
+
+def replay_tiled(plate, ratio=2.0, strip=1024):
+    """As replay() in magnifier.py, a strip of rows at a time, in place:
+    the hologram of the plate's light against the reference beam (see
+    Plate.hologram), lit by that beam again."""
+    pitch, n = PLATE["pitch"], plate.shape[0]
+    typical = math.sqrt(sum(float(np.sum(np.abs(plate[i : i + strip]) ** 2)) for i in range(0, n, strip)) / n**2)
+    sine = REFERENCE / math.sqrt(1 + REFERENCE**2)
+    k = 2 * math.pi / WAVELENGTH
+    for i in range(0, n, strip):
+        y = ((np.arange(i, min(i + strip, n)) - n / 2 + 0.5) * pitch)[:, None]
+        beam = ratio * typical * np.exp(1j * k * sine * y)
+        hologram = np.abs(plate[i : i + strip] + beam) ** 2
+        plate[i : i + strip] = hologram * beam / np.abs(beam) ** 2
+    return plate
+
+
 def render(name, parts, world, focus, plate_size=PLATE["size"]):
     """Makes the hologram of a scene and the eye's views of it, into
     out/<name>: `parts` maps a name to each part's points, normals,
     albedo and gloss (see ball and wall), `world` is the scene as Mitsuba
     sees it, and `focus` maps a name to each depth the eye focuses at.
-    The plate is `plate_size` pixels square, PLATE's pitch apart.
-    Saves the plate's light, lit by the reference beam again (replay.npy,
-    for the viewer), and a sheet of views (views.png)."""
-    import cupy as cp
-
-    from .gpu import GpuEye, GpuPlate, SeenPoints
+    The plate is `plate_size` pixels square, PLATE's pitch apart, summed a
+    tile at a time (sum_tiled). Saves the spectrum of the plate's light,
+    lit by the reference beam again (spectrum.npy, for the viewer), and a
+    sheet of views (views.png)."""
+    from .viewer import Look
 
     out = Path("out") / name
     out.mkdir(parents=True, exist_ok=True)
@@ -183,26 +232,26 @@ def render(name, parts, world, focus, plate_size=PLATE["size"]):
     start = time.time()
     rng = np.random.default_rng(1)
     phases = rng.uniform(0, 2 * math.pi, len(points))
-    size = dict(PLATE, size=plate_size)
-    plate = GpuPlate(**size)
-    seen = SeenPoints(**size, points=points[alive], maps=cp.asarray(light[alive]), cone=CONE)
-    plate.light = seen.light(phases[alive])
-    cp.cuda.Device().synchronize()
-    plate.finish()
-    print(f"summed on {plate.size}^2 pixels on the GPU: {time.time() - start:.1f} s", flush=True)
+    plate = sum_tiled(points[alive], light[alive], phases[alive], plate_size)
+    del light
+    tiles = (-(-plate_size // TILE)) ** 2
+    print(f"summed on {plate_size}^2 pixels on the GPU, {tiles} tiles: {time.time() - start:.1f} s", flush=True)
 
     start = time.time()
-    lit = replay(plate).astype(np.complex64)
-    np.save(out / "replay.npy", lit)
-    eye = GpuEye(lit, plate.pitch, WAVELENGTH)
+    look = Look.from_replay(replay_tiled(plate))
+    del plate
+    look.save(out / "spectrum.npy")
+    print(f"replayed, its spectrum saved: {time.time() - start:.1f} s", flush=True)
+
+    start = time.time()
     tiles = []
     for where, direction in VIEWS.items():
         for label, depth in focus.items():
-            view = eye.view(direction, PUPIL, depth)
-            half = 0.44 * plate.size * plate.pitch
-            tiles.append((f"looking {where}, focused {label}", picture(view, plate.pitch, half=half, shrink=4 * plate.size // PLATE["size"])))
-    sheet(tiles).save(out / "views.png")
-    print(f"eye's views: {time.time() - start:.1f} s; wrote {out}/views.png and replay.npy")
+            view = look.view(direction, PUPIL, depth)
+            tiles.append((f"looking {where}, focused {label}", view))
+    scale = look.scale(tiles[0][1])
+    sheet([(t, look.image(v, scale, "")) for t, v in tiles]).save(out / "views.png")
+    print(f"eye's views: {time.time() - start:.1f} s; wrote {out}/views.png and spectrum.npy")
 
 
 def main():
