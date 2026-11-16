@@ -166,6 +166,9 @@ def sum_tiled(points, light, phases, size):
     the points, so this is exact."""
     import cupy as cp
 
+    if len(points) == 0:
+        return np.zeros((size, size), np.complex64)
+
     from .gpu import SeenPoints
 
     pitch = PLATE["pitch"]
@@ -188,6 +191,77 @@ def sum_tiled(points, light, phases, size):
     return plate
 
 
+# Points at least this far from the plate (um) have their light gathered
+# on recording planes first (see sum_planes); 0 sums all of it directly.
+SLAB = 1000.0
+# Points are kept at least this far (um) from their recording plane. A
+# point's light is described by rays (its brightness in each direction),
+# which is only right far enough from it, compared with how quickly its
+# brightness changes with direction: with the cone about 0.1 rad across,
+# some hundreds of um. Closer, the sums differ by some percent from the
+# light summed straight onto the plate; 400 um keeps that to a few.
+CLEAR = 400.0
+
+
+def sum_planes(points, light, phases, size, slab=SLAB):
+    """As sum_tiled, but quicker for deep scenes: only points within
+    `slab` of the plate are summed onto it directly. The rest are taken
+    in slabs of that depth, each slab's light summed onto a recording
+    plane just on the plate's side of it (where it covers little, so
+    costs little), and the plane's light then carried on to the plate
+    by its plane waves (see propagate). That step is exact: light
+    crossing open space is the sum of its plane waves. But each point's
+    light is described by rays, which is right only some way from the
+    point (see CLEAR), so the result differs from summing straight onto
+    the plate by a few percent."""
+    depth = -points[:, 2]
+    slice_ = np.where(depth >= 0, np.floor(depth / slab), -np.floor(-depth / slab)).astype(int)
+    near = slice_ == 0
+    plate = sum_tiled(points[near], light[near], phases[near], size)
+    for k in sorted(set(slice_[~near])):
+        mine = slice_ == k
+        # The plane, CLEAR short of the slab's near face.
+        plane = np.sign(k) * (abs(k) * slab - CLEAR)
+        margin = int(math.ceil(CONE * abs(plane) / PLATE["pitch"])) + 32
+        shifted = points[mine] + [0.0, 0.0, plane]
+        field = sum_tiled(shifted, light[mine], phases[mine], size + 2 * margin)
+        propagate(field, plane, margin, plate)
+        del field
+    return plate
+
+
+def propagate(field, distance, margin, plate):
+    """Adds to `plate` the light `field` (on a plane `margin` pixels wider
+    on each side, `distance` behind the plate, or in front if negative)
+    sends it: each of its plane waves moved on by its own phase (the
+    angular spectrum method), keeping only those within CONE, as all the
+    scene's light is, and within what the sampling can carry without
+    aliasing (band-limited, after Matsushima). It is done tile by tile on
+    the GPU, each with a border of `margin`, as far as light can spread
+    on the way, so tiles do not affect one another (overlap-save)."""
+    import cupy as cp
+
+    n, pitch = plate.shape[0], PLATE["pitch"]
+    fft = 1 << int(math.ceil(math.log2(TILE + 2 * margin)))
+    f = cp.fft.fftfreq(fft, pitch).astype(cp.float32)
+    fx, fy = f[None, :], f[:, None]
+    lam = WAVELENGTH
+    s2 = (fx * fx + fy * fy) * lam * lam
+    limit = 1 / (lam * math.sqrt((2 * distance / (fft * pitch)) ** 2 + 1))
+    keep = (s2 < CONE**2 / (1 + CONE**2)) & (cp.abs(fx) < limit) & (cp.abs(fy) < limit)
+    step = keep * cp.exp((2j * math.pi / lam) * distance * cp.sqrt(cp.maximum(0, 1 - s2))).astype(cp.complex64)
+    for y0 in range(0, n, TILE):
+        for x0 in range(0, n, TILE):
+            th, tw = min(TILE, n - y0), min(TILE, n - x0)
+            # The plane's pixel p + margin is above the plate's pixel p.
+            region = cp.zeros((fft, fft), cp.complex64)
+            part = field[y0 : y0 + th + 2 * margin, x0 : x0 + tw + 2 * margin]
+            region[: part.shape[0], : part.shape[1]] = cp.asarray(part)
+            moved = cp.fft.ifft2(cp.fft.fft2(region) * step)
+            plate[y0 : y0 + th, x0 : x0 + tw] += cp.asnumpy(moved[margin : margin + th, margin : margin + tw])
+    del step, keep, s2
+
+
 def replay_tiled(plate, ratio=2.0, strip=1024):
     """As replay() in magnifier.py, a strip of rows at a time, in place:
     the hologram of the plate's light against the reference beam (see
@@ -204,13 +278,14 @@ def replay_tiled(plate, ratio=2.0, strip=1024):
     return plate
 
 
-def render(name, parts, world, focus, plate_size=PLATE["size"]):
+def render(name, parts, world, focus, plate_size=PLATE["size"], slab=SLAB):
     """Makes the hologram of a scene and the eye's views of it, into
     out/<name>: `parts` maps a name to each part's points, normals,
     albedo and gloss (see ball and wall), `world` is the scene as Mitsuba
     sees it, and `focus` maps a name to each depth the eye focuses at.
     The plate is `plate_size` pixels square, PLATE's pitch apart, summed a
-    tile at a time (sum_tiled). Saves the spectrum of the plate's light,
+    tile at a time, through recording planes `slab` apart (sum_planes; 0
+    for none). Saves the spectrum of the plate's light,
     lit by the reference beam again (spectrum.npy, for the viewer), and a
     sheet of views (views.png)."""
     from .viewer import Look
@@ -232,10 +307,11 @@ def render(name, parts, world, focus, plate_size=PLATE["size"]):
     start = time.time()
     rng = np.random.default_rng(1)
     phases = rng.uniform(0, 2 * math.pi, len(points))
-    plate = sum_tiled(points[alive], light[alive], phases[alive], plate_size)
+    plate = sum_planes(points[alive], light[alive], phases[alive], plate_size, slab=slab)
     del light
     tiles = (-(-plate_size // TILE)) ** 2
-    print(f"summed on {plate_size}^2 pixels on the GPU, {tiles} tiles: {time.time() - start:.1f} s", flush=True)
+    how = f"recording planes every {slab:g} um" if slab else "directly"
+    print(f"summed on {plate_size}^2 pixels on the GPU, {tiles} tiles, {how}: {time.time() - start:.1f} s", flush=True)
 
     start = time.time()
     look = Look.from_replay(replay_tiled(plate))

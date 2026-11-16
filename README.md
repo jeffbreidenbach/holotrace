@@ -52,8 +52,9 @@ light on an NVIDIA GPU with CuPy, many times faster:
 uv run --extra gpu holotrace mesh --gpu
 uv run --extra gpu holotrace solid      # step 3: a solid scene across the plate
 uv run --extra gpu holotrace benchy     # 3DBenchy, the 3D printing test boat
-uv run --extra gpu holotrace benchy --scale 5 --spacing 16   # a 1 cm plate, tiled (about 7 min on an 8 GB GPU from 2016)
+uv run --extra gpu holotrace benchy --scale 5 --spacing 16   # a 1 cm plate, tiled, with recording planes (about 2 min on an 8 GB GPU from 2016)
 uv run --extra gpu holotrace view benchy --focus 0   # a movie: eye moving, refocusing
+uv run --extra gpu holotrace view NAME --eye 300     # ... seen by a real eye 30 cm away, 4 mm pupil
 uv run --extra gpu holotrace speckle    # step 4 (parked): phases optimized against speckle
 uv run --extra gpu holotrace gpucheck   # the GPU's sum against the CPU's
 ```

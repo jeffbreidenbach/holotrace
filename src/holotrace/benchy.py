@@ -1,10 +1,12 @@
 """3DBenchy, the 3D printing test boat, as a hologram.
 
-    holotrace benchy [--scale S] [--spacing D]
+    holotrace benchy [--scale S] [--spacing D] [--slab T]
 
 makes it S times as big (default 1), on a plate S times as wide, with
-its surface sampled into points D um apart (default solid.SPACING). The
-results go to out/benchy-<width>mm-<D>um.
+its surface sampled into points D um apart (default solid.SPACING),
+through recording planes every T um (default solid.SLAB; 0 for none:
+see solid.sum_planes). The results go to out/benchy-<width>mm-<D>um,
+with -planes<T> added when planes are used.
 
 The boat (scenes/3dbenchy, public domain since 2025), scaled to about
 1.7 mm long, stands upright, turned 30 degrees to show its bow, its
@@ -87,4 +89,7 @@ def main():
     focus = {k: scale * v for k, v in FOCUS.items()}
     size = round(solid.PLATE["size"] * scale)
     name = f"benchy-{size * solid.PLATE['pitch'] / 1000:g}mm-{spacing:g}um"
-    solid.render(name, {"boat": hull, "wall": wall}, world(triangles, scale), focus, plate_size=size)
+    slab = _option("--slab", solid.SLAB)
+    if slab:
+        name += f"-planes{slab:g}"
+    solid.render(name, {"boat": hull, "wall": wall}, world(triangles, scale), focus, plate_size=size, slab=slab)

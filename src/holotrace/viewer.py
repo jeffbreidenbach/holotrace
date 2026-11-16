@@ -2,6 +2,7 @@
 sheet comparing scenes and light.
 
     holotrace view NAME [--pupil P] [--focus DEPTH] [--light laser|led]
+                        [--eye MM [--pupil-mm MM]]
 
 reads the spectrum of the plate's light, lit by the reference beam
 again, saved by a scene (out/NAME/spectrum.npy; see solid.render), and
@@ -15,7 +16,10 @@ what changes; then, looking straight on, it refocuses from in front of
 the plate to well behind it.
 Its pupil's numerical aperture is P (default 0.03: sharper than a real
 eye's at reading distance, about 0.01, which at this size would blur
-the scene and hardly see depth).
+the scene and hardly see depth). With --eye, the eye is instead a real
+one MM millimetres away, its pupil --pupil-mm across (default 4), seeing
+each part of the plate from its own direction (see Look.eye_view); it
+moves as far as it can and still see the whole plate.
 
     holotrace compare NAME...
 
@@ -112,6 +116,45 @@ class Look:
             total = total + cp.abs(cp.fft.ifft2(cp.fft.ifftshift(padded))) ** 2
         return cp.asnumpy(total / len(self.light))
 
+    def eye_view(self, eye, pupil, depth, grid=9):
+        """What an eye at `eye` (x, y, and its distance in front of the
+        plate, in um) sees through a pupil of radius `pupil` (um), focused
+        `depth` behind the plate: an array covering the whole plate.
+
+        Up close, different parts of the plate are seen from different
+        directions: the eye sees each point of the plane in focus along
+        the line from it to the eye. So views along the directions to a
+        `grid` x `grid` lattice of points across the plate are blended,
+        each part of the image from the directions of the points around
+        it (bilinearly). The pupil's numerical aperture is its radius over
+        its distance."""
+        ex, ey, distance = eye
+        aperture = pupil / distance
+        nodes = np.linspace(-self.width / 2, self.width / 2, grid)
+        views = {}
+        for j, qy in enumerate(nodes):
+            for i, qx in enumerate(nodes):
+                v = np.array([ex - qx, ey - qy, distance + depth])
+                views[i, j] = self.view(tuple(v[:2] / np.linalg.norm(v)), aperture, depth)
+        size = views[0, 0].shape[0]
+        # Where each pixel is among the nodes (the view's pixel j is j /
+        # size of the way across the plate).
+        f = np.arange(size) / size * (grid - 1)
+        i0 = np.minimum(f.astype(int), grid - 2)
+        a = f - i0
+        out = np.zeros((size, size))
+        for di in (0, 1):
+            for dj in (0, 1):
+                wx = a if di else 1 - a
+                wy = a if dj else 1 - a
+                for j in range(grid - 1):
+                    rows = i0 == j
+                    for i in range(grid - 1):
+                        cols = i0 == i
+                        block = views[i + di, j + dj][np.ix_(rows, cols)]
+                        out[np.ix_(rows, cols)] += block * wy[rows][:, None] * wx[cols][None, :]
+        return out
+
     def _middle(self, view):
         m = int(0.44 * view.shape[0])
         c = view.shape[0] // 2
@@ -149,28 +192,44 @@ LIGHTS = {"laser": LASER, "led": LED}
 def main():
     names = _names()
     name = names[0] if names else "benchy"
-    pupil = _option("--pupil", 0.03)
     focus = _option("--focus", 200.0)
     light = _option("--light", "laser", str)
+    distance = _option("--eye", 0.0)  # mm; 0 for an eye infinitely far
     out = Path("out") / name
     start = time.time()
     look = Look.load(out / "spectrum.npy", LIGHTS[light])
+    depths = np.linspace(-400, 900, 27) * look.n / PLATE["size"]
 
-    # Across and back, then up and back, as far as the light reaches past
-    # the pupil.
-    reach = CONE - pupil
-    sweep = np.concatenate([np.linspace(-reach, reach, 24), np.linspace(reach, -reach, 24)])
-    shots = [((s, 0.0), focus, f"{light}, from {s:+.2f} rad side to side, focused {focus:.0f} um behind") for s in sweep]
-    shots += [((0.0, s), focus, f"{light}, from {s:+.2f} rad up and down, focused {focus:.0f} um behind") for s in sweep]
-    for depth in np.linspace(-400, 900, 27) * look.n / PLATE["size"]:
-        where = "in front of" if depth < 0 else "behind"
-        shots.append(((0.0, 0.0), depth, f"{light}, straight on, focused {abs(depth):.0f} um {where} the plate"))
+    if distance:
+        # A real eye, `distance` mm away, its pupil `--pupil-mm` across,
+        # moving across and up and down, as far as the plate's light
+        # reaches it from every part of the plate.
+        d = distance * 1000
+        radius = _option("--pupil-mm", 4.0) * 500
+        reach = (CONE - radius / d - look.width / 2 / d) * d
+        sweep = np.concatenate([np.linspace(-reach, reach, 24), np.linspace(reach, -reach, 24)])
+        what = f"{light}, eye {distance:g} mm away"
+        shots = [((s, 0.0, d), focus, f"{what}, {s / 1000:+.1f} mm to the side, focused {focus:.0f} um behind") for s in sweep]
+        shots += [((0.0, s, d), focus, f"{what}, {s / 1000:+.1f} mm up, focused {focus:.0f} um behind") for s in sweep]
+        shots += [((0.0, 0.0, d), z, f"{what}, focused {abs(z):.0f} um {'in front of' if z < 0 else 'behind'} the plate") for z in depths]
+        see = lambda where, z: look.eye_view(where, radius, z)
+        movie = out / f"movie-{light}-eye{distance:g}mm.mp4"
+    else:
+        # An eye far away, looking along directions across and up and down,
+        # as far as the light reaches past the pupil.
+        pupil = _option("--pupil", 0.03)
+        reach = CONE - pupil
+        sweep = np.concatenate([np.linspace(-reach, reach, 24), np.linspace(reach, -reach, 24)])
+        shots = [((s, 0.0), focus, f"{light}, from {s:+.2f} rad side to side, focused {focus:.0f} um behind") for s in sweep]
+        shots += [((0.0, s), focus, f"{light}, from {s:+.2f} rad up and down, focused {focus:.0f} um behind") for s in sweep]
+        shots += [((0.0, 0.0), z, f"{light}, straight on, focused {abs(z):.0f} um {'in front of' if z < 0 else 'behind'} the plate") for z in depths]
+        see = lambda where, z: look.view(where, pupil, z)
+        movie = out / f"movie-{light}.mp4"
 
-    scale = look.scale(look.view((0.0, 0.0), pupil, focus))
-    movie = out / f"movie-{light}.mp4"
+    scale = look.scale(see(shots[len(sweep) // 2][0], focus))
     with tempfile.TemporaryDirectory() as frames:
-        for i, (d, z, text) in enumerate(shots):
-            look.image(look.view(d, pupil, z), scale, text).save(f"{frames}/{i:04d}.png")
+        for i, (where, z, text) in enumerate(shots):
+            look.image(see(where, z), scale, text).save(f"{frames}/{i:04d}.png")
         subprocess.run(
             ["ffmpeg", "-y", "-loglevel", "error", "-framerate", "8", "-i", f"{frames}/%04d.png",
              "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "20", str(movie)],
