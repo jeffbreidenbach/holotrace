@@ -58,10 +58,13 @@ uv run --extra gpu holotrace benchy --scale 20 --spacing 40  # a 4 cm plate: abo
 # Wide plates: 0.25 um pixels, the scene's light within 35 degrees either way.
 uv run --extra gpu holotrace benchy --plate 20.48 --scale 6 --spacing 12 --turn 15 --pixel 0.25 --cone 35 --slab 600
 #   a 2 cm plate, the boat 1 cm long: about 20 min, the spectrum 13 GB on disk
-uv run --extra gpu holotrace benchy --plate 40.96 --scale 12 --spacing 24 --turn 15 --pixel 0.25 --cone 35 --slab 600
-#   a 4 cm plate, the boat 2 cm long, carried in main memory: the spectrum 54 GB on disk
-uv run --extra gpu holotrace view benchy --focus 0   # a movie: eye moving, refocusing
+# Plates too big for memory are summed plane to plane (see planes.py): groups of
+# slabs carried a short way, then each group's plane to the plate in one go.
+uv run --extra gpu holotrace benchy --plate 40.96 --scale 16 --spacing 32 --pixel 0.25 --cone 35 --slab 600
+#   a 4 cm plate, the boat 2.7 cm long: the spectrum 54 GB on disk, and as much again while it is made
+uv run --extra gpu holotrace view benchy --focus 0   # a movie: eye moving side to side, up and down
 uv run --extra gpu holotrace view NAME --eye 300     # ... seen by a real eye 30 cm away, 4 mm pupil
+uv run --extra gpu holotrace view NAME --eye 300 --source 0.02   # ... lit by a lamp 2 cm across, 1 m off: far less speckle
 uv run --extra gpu holotrace speckle    # step 4 (parked): phases optimized against speckle
 uv run --extra gpu holotrace gpucheck   # the GPU's sum against the CPU's
 ```

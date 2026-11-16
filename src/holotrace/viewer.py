@@ -1,7 +1,7 @@
 """Looking at holograms: a movie of an eye moving and refocusing, and a
 sheet comparing scenes and light.
 
-    holotrace view NAME [--pupil P] [--focus DEPTH] [--light laser|led]
+    holotrace view NAME [--pupil P] [--focus DEPTH] [--light laser|led | --source R]
                         [--eye MM [--pupil-mm MM]]
 
 reads the spectrum of the plate's light, as the hologram sends it out,
@@ -12,8 +12,7 @@ moves from left to right and back, then from below to above and back,
 focused at DEPTH (um behind the plate; default 200), so that what is
 nearer and farther shifts against each other (parallax, both ways: a
 hologram has it up and down as well as side to side), and what hides
-what changes; then, looking straight on, it refocuses from in front of
-the plate to well behind it.
+what changes.
 Its pupil's numerical aperture is P (default 0.03: sharper than a real
 eye's at reading distance, about 0.01, which at this size would blur
 the scene and hardly see depth). With --eye, the eye is instead a real
@@ -30,7 +29,15 @@ The light is a laser's, of one wavelength from one point, or an LED's
 (see Look): a few wavelengths, from a source with some size, each
 replaying the plate a little differently, their brightness added. That
 smooths speckle, the more so the farther from the plate, and blurs by
-as much.
+as much. With --source, the light is instead a lamp R radians across as
+seen from the plate (see lamp): each part of it replays the plate from
+its own direction, so the eye's pupil takes in a different part of the
+plate's light, and so a different speckle, from each. Speckle averages
+away once the lamp is wider than the pupil seen from the scene (twice
+its numerical aperture), while the image blurs only by the lamp's width
+times each point's distance from the plate: little, for a scene at the
+plate. A lamp 0.02 rad across (2 cm, 1 m off) roughly halves the speckle
+a real eye sees.
 """
 
 import json
@@ -46,13 +53,23 @@ import cupyx.scipy.fft as cufft
 import numpy as np
 from PIL import Image, ImageDraw
 
-from .magnifier import CONE, PLATE, REFERENCE, WAVELENGTH, sheet
+from .magnifier import CONE, REFERENCE, WAVELENGTH, sheet
 
 # An LED's light, as replays averaged: wavelengths about the middle, in
 # um, and directions its light arrives from across the plate (radians:
 # a source a few mm across, some metres off).
 LED = [(0.0, 0.0), (-0.008, 0.0), (0.008, 0.0), (0.0, -0.001), (0.0, 0.001)]
 LASER = [(0.0, 0.0)]
+
+
+def lamp(across, count=7, offsets=(-0.008, 0.0, 0.008)):
+    """A source `across` radians wide as seen from the plate (a disc),
+    at wavelengths `offsets` from the middle: replays from directions on
+    a `count` x `count` grid within the disc, each direction across and
+    up (radians), at each wavelength."""
+    t = (np.arange(count) - (count - 1) / 2) / count * across
+    tilts = [(x, y) for y in t for x in t if x * x + y * y <= (across / 2) ** 2] or [(0.0, 0.0)]
+    return [(offset, tilt) for offset in offsets for tilt in tilts]
 
 
 class Look:
@@ -74,7 +91,8 @@ class Look:
     def __init__(self, spectrum, pitch, light=LASER, cone=CONE, reference=None):
         self.spectrum = spectrum
         self.light = light
-        self.n = spectrum.shape[0]
+        # Kept whole, or (see planes.py) a block of columns at a time.
+        self.n = spectrum.shape[-2]
         self.width = self.n * pitch
         self.cone = cone
         # The reference beam's angle, as a sine.
@@ -101,22 +119,30 @@ class Look:
         `pupil`: an array covering the whole plate."""
         sine = self.reference
         total = 0
+        # Every wavelength's view the same size, as big as the shortest's
+        # patch needs, so that they can be added.
+        shortest = WAVELENGTH + min(offset for offset, _ in self.light)
+        widest = int(math.ceil(pupil / shortest * self.width)) + 1
+        size = cufft.next_fast_len(4 * widest + 2)
         for offset, tilt in self.light:
             lam = WAVELENGTH + offset
-            # How far this light shifts the spectrum (cycles per um).
-            shift = np.array([tilt / lam, (1 / lam - 1 / WAVELENGTH) * sine])
+            # How far this light shifts the spectrum (cycles per um): its
+            # tilt across, and up (as a change of the reference's angle),
+            # and its wavelength.
+            tx, ty = tilt if isinstance(tilt, tuple) else (tilt, 0.0)
+            up = ty * math.sqrt(1 - sine * sine) / lam
+            shift = np.array([tx / lam, up + (1 / lam - 1 / WAVELENGTH) * sine])
             middle = np.round((np.array(direction) / lam - shift) * self.width).astype(int)
             m = int(math.ceil(pupil / lam * self.width)) + 1
             kx = np.arange(middle[0] - m, middle[0] + m + 1)
             ky = np.arange(middle[1] - m, middle[1] + m + 1)
-            patch = cp.asarray(self.spectrum[np.ix_(ky % self.n, kx % self.n)])
+            patch = cp.asarray(self._patch(ky % self.n, kx % self.n))
             sx = cp.asarray(((kx / self.width + shift[0]) * lam)[None, :], cp.float32)
             sy = cp.asarray(((ky / self.width + shift[1]) * lam)[:, None], cp.float32)
             seen = (sx - direction[0]) ** 2 + (sy - direction[1]) ** 2 < pupil**2
             cos = cp.sqrt(cp.maximum(0, 1 - sx * sx - sy * sy))
             patch = patch * seen * cp.exp((-2j * math.pi / lam) * cos * depth).astype(cp.complex64)
             # Twice as many samples as the patch, so the view is smooth.
-            size = cufft.next_fast_len(4 * m + 2)
             padded = cp.zeros((size, size), cp.complex64)
             c = size // 2
             padded[c - m : c + m + 1, c - m : c + m + 1] = patch
@@ -124,6 +150,14 @@ class Look:
             del padded, patch
         cp.get_default_memory_pool().free_all_blocks()
         return cp.asnumpy(total / len(self.light))
+
+    def _patch(self, ky, kx):
+        """The spectrum at rows `ky` and columns `kx`."""
+        s = self.spectrum
+        if s.ndim == 2:
+            return s[np.ix_(ky, kx)]
+        block = s.shape[2]
+        return s[(kx // block)[None, :], ky[:, None], (kx % block)[None, :]]
 
     def eye_view(self, eye, pupil, depth, grid=9):
         """What an eye at `eye` (x, y, and its distance in front of the
@@ -203,11 +237,15 @@ def main():
     name = names[0] if names else "benchy"
     focus = _option("--focus", 200.0)
     light = _option("--light", "laser", str)
+    samples = LIGHTS[light]
+    if "--source" in sys.argv:
+        across = _option("--source", 0.02)
+        samples = lamp(across)
+        light = f"lamp{across:g}rad"
     distance = _option("--eye", 0.0)  # mm; 0 for an eye infinitely far
     out = Path("out") / name
     start = time.time()
-    look = Look.load(out / "spectrum.npy", LIGHTS[light])
-    depths = np.linspace(-400, 900, 27) * look.width / (PLATE["size"] * PLATE["pitch"])
+    look = Look.load(out / "spectrum.npy", samples)
     cone = look.cone
 
     if distance:
@@ -221,7 +259,6 @@ def main():
         what = f"{light}, eye {distance:g} mm away"
         shots = [((s, 0.0, d), focus, f"{what}, {s / 1000:+.1f} mm to the side, focused {focus:.0f} um behind") for s in sweep]
         shots += [((0.0, s, d), focus, f"{what}, {s / 1000:+.1f} mm up, focused {focus:.0f} um behind") for s in sweep]
-        shots += [((0.0, 0.0, d), z, f"{what}, focused {abs(z):.0f} um {'in front of' if z < 0 else 'behind'} the plate") for z in depths]
         see = lambda where, z: look.eye_view(where, radius, z)
         movie = out / f"movie-{light}-eye{distance:g}mm.mp4"
     else:
@@ -232,7 +269,6 @@ def main():
         sweep = np.concatenate([np.linspace(-reach, reach, 24), np.linspace(reach, -reach, 24)])
         shots = [((s, 0.0), focus, f"{light}, from {s:+.2f} rad side to side, focused {focus:.0f} um behind") for s in sweep]
         shots += [((0.0, s), focus, f"{light}, from {s:+.2f} rad up and down, focused {focus:.0f} um behind") for s in sweep]
-        shots += [((0.0, 0.0), z, f"{light}, straight on, focused {abs(z):.0f} um {'in front of' if z < 0 else 'behind'} the plate") for z in depths]
         see = lambda where, z: look.view(where, pupil, z)
         movie = out / f"movie-{light}.mp4"
 

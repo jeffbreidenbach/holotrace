@@ -33,6 +33,7 @@ from pathlib import Path
 
 import numpy as np
 
+from . import planes
 from .magnifier import PLATE, PUPIL, WAVELENGTH, sheet
 
 # Lengths in micrometres.
@@ -247,9 +248,6 @@ OPTICS = Optics()
 # memory allows for its deepest recording plane: its patch is the tile
 # and as far as light spreads either side, and is transformed whole.
 GPU_PATCH = 15360
-# The biggest patch carried in main memory (see _tile_in_memory): about
-# 10 GB.
-HOST_PATCH = 36000
 
 
 def sum_planes(points, light, phases, size, kept=None):
@@ -301,33 +299,16 @@ def sum_planes(points, light, phases, size, kept=None):
         groups.append((plane, mine, seen_from, margin, bounds))
     deepest = max(m for _, _, _, m, _ in groups)
     tile = min(n, (GPU_PATCH - 2 * deepest) // 256 * 256)
-    # Too deep for the GPU to carry a tile of any size: the patches are
-    # carried in main memory instead (see _tile_in_memory).
-    in_memory = tile < 4096
-    if in_memory:
-        most = (HOST_PATCH - 2 * deepest) // 256 * 256
-        if most < 4096:
-            raise ValueError("the scene is too deep for the plate's light to be carried")
-        count = -(-n // most)
-        tile = -(-n // count // 256) * 256 if count > 1 else n
-        region = _fast_len(tile + 2 * deepest)
-        work = np.empty((region, region), np.complex64)
+    if tile < 1024:
+        raise ValueError("too deep a scene to carry tile by tile: see planes.py")
 
     if kept is None:
         kept = np.zeros((n, n), np.complex64)
     tiles, done, start = (-(-n // tile)) ** 2, 0, time.time()
-    where = f", carried in main memory {region}^2 at a time" if in_memory else ""
-    print(f"  kept every {pitch:g} um: {n}^2 pixels, in {tiles} tiles of {tile}^2, {len(groups)} slabs{where}", flush=True)
+    print(f"  kept every {pitch:g} um: {n}^2 pixels, in {tiles} tiles of {tile}^2, {len(groups)} slabs", flush=True)
     for y0 in range(0, n, tile):
         for x0 in range(0, n, tile):
             th, tw = min(tile, n - y0), min(tile, n - x0)
-            if in_memory:
-                kept[y0 : y0 + th, x0 : x0 + tw] = _tile_in_memory(
-                    groups, grid, light, phases, (x0, y0, tw, th), deepest, work
-                )
-                done += 1
-                print(f"  {done} of {tiles} tiles, {time.time() - start:.0f} s", flush=True)
-                continue
             out = cp.zeros((th, tw), cp.complex64)
             for plane, mine, seen_from, m, (lo_x, hi_x, lo_y, hi_y) in groups:
                 ox, oy, w, h = x0 - m, y0 - m, tw + 2 * m, th + 2 * m
@@ -335,7 +316,7 @@ def sum_planes(points, light, phases, size, kept=None):
                 if not near.any():
                     continue
                 which = mine[near]
-                seen = SeenPoints(**grid, points=seen_from[near], maps=cp.asarray(light[which]),
+                seen = SeenPoints(**grid, points=seen_from[near], maps=cp.asarray(light[which], cp.float32),
                                   cone=o.cone, tile=(ox, oy, w, h))
                 out += _carry(seen.light(phases[which]), plane, m, pitch)
                 del seen
@@ -399,67 +380,6 @@ def _fast_len(n):
     return cufft.next_fast_len(n)
 
 
-def _tile_in_memory(groups, grid, light, phases, box, margin, work, strip=1024, block=1024):
-    """The light of the tile `box` (x, y, width, height, in kept pixels),
-    as in sum_planes, for patches too big for the GPU: each slab's patch
-    (the tile and `margin` all round, padded to `work`'s size) is made in
-    `work`, in main memory, a strip of rows at a time on the GPU, and
-    transformed along its rows as it goes; then a block of columns at a
-    time is transformed along the columns, carried (as in _carry), and
-    transformed back, and the tile's rows added up for all the slabs.
-    Only then are the rows transformed back. So the GPU holds only a strip
-    or block at a time."""
-    import cupy as cp
-    import cupyx.scipy.fft as cufft
-
-    from .gpu import SeenPoints
-
-    o, lam, pitch = OPTICS, WAVELENGTH, grid["pitch"]
-    x0, y0, tw, th = box
-    size = work.shape[0]
-    ox, oy = x0 - margin, y0 - margin
-    total = np.zeros((th, size), np.complex64)
-    fx = cp.fft.fftfreq(size, pitch).astype(cp.float32)
-    fy = fx[:, None]
-    for plane, mine, seen_from, _, (lo_x, hi_x, lo_y, hi_y) in groups:
-        across = (hi_x > ox) & (lo_x < ox + size)
-        if not (across & (hi_y > oy) & (lo_y < oy + size)).any():
-            continue
-        for r in range(0, size, strip):
-            h = min(strip, size - r)
-            near = across & (hi_y > oy + r) & (lo_y < oy + r + h)
-            if not near.any():
-                work[r : r + h] = 0
-                continue
-            which = mine[near]
-            seen = SeenPoints(**grid, points=seen_from[near], maps=cp.asarray(light[which]),
-                              cone=o.cone, tile=(ox, oy + r, size, h))
-            rows = cufft.fft(seen.light(phases[which]), axis=1, overwrite_x=True)
-            work[r : r + h] = cp.asnumpy(rows)
-            del seen, rows
-        limit = 1 / (lam * math.sqrt((2 * plane / (size * pitch)) ** 2 + 1))
-        for c in range(0, size, block):
-            cols = cufft.fft(cp.asarray(np.ascontiguousarray(work[:, c : c + block])), axis=0, overwrite_x=True)
-            x = fx[None, c : c + block]
-            s2 = (x * x + fy * fy) * lam * lam
-            keep = (s2 < o.sine**2) & (cp.abs(x) < limit) & (cp.abs(fy) < limit)
-            phase = (2 * math.pi / lam) * plane * cp.sqrt(cp.maximum(0, 1 - s2))
-            cols *= keep * cp.exp(1j * phase).astype(cp.complex64)
-            del s2, keep, phase
-            cols = cufft.ifft(cols, axis=0, overwrite_x=True)
-            total[:, c : c + block] += cp.asnumpy(cols[margin : margin + th])
-            del cols
-        cp.get_default_memory_pool().free_all_blocks()
-    out = np.empty((th, tw), np.complex64)
-    for r in range(0, th, strip):
-        rows = cufft.ifft(cp.asarray(total[r : r + strip]), axis=1, overwrite_x=True)
-        out[r : r + strip] = cp.asnumpy(rows[:, margin : margin + tw])
-        del rows
-    cp.get_default_memory_pool().free_all_blocks()
-    cp.fft.config.get_plan_cache().clear()
-    return out
-
-
 def spectrum_in_place(a, block=512):
     """Replaces `a` (square, complex) with its 2D Fourier transform, in
     place: the rows a block at a time, then the columns, so that only a
@@ -481,8 +401,9 @@ def render(name, parts, world, focus, plate_size=PLATE["size"], shadows=True):
     sees it, and `focus` maps a name to each depth the eye focuses at.
     The plate is `plate_size` pixels square, as OPTICS has it, summed a
     tile at a time, through recording planes (sum_planes), and kept as
-    the eye can see it; too big for memory, it is kept in the spectrum's
-    file on disk instead. With shadows off, nothing casts shadows (see
+    the eye can see it; too big for memory, it is summed plane to plane
+    instead, into the spectrum's file on disk (see planes.py). With
+    shadows off, nothing casts shadows (see
     maps).
 
     Lit by the reference beam again, the hologram sends out the scene's
@@ -517,10 +438,14 @@ def render(name, parts, world, focus, plate_size=PLATE["size"], shadows=True):
     o = OPTICS
     n = plate_size // o.keep
     big = n * n * 8 > 6 * 2**30
-    kept = np.lib.format.open_memmap(out / "spectrum.npy", "w+", np.complex64, (n, n)) if big else None
-    # Only the points seen at all, their maps no longer kept twice.
-    light = light[alive]
-    plate = sum_planes(points[alive], light, phases[alive], plate_size, kept)
+    # Only the points seen at all, their maps no longer kept twice, and
+    # in half precision (plenty for brightness), to leave memory for
+    # carrying the plate's light.
+    light = light[alive].astype(np.float16)
+    if big:
+        plate = planes.sum_by_groups(points[alive], light, phases[alive], plate_size, out / "spectrum.npy")
+    else:
+        plate = sum_planes(points[alive], light, phases[alive], plate_size)
     del light
     print(
         f"summed for {plate_size}^2 pixels {o.pixel:g} um apart on the GPU, light within "
@@ -529,11 +454,10 @@ def render(name, parts, world, focus, plate_size=PLATE["size"], shadows=True):
     )
 
     start = time.time()
-    spectrum_in_place(plate)
     if big:
-        plate.flush()
         Look.save(out / "spectrum.npy", None, o)
     else:
+        spectrum_in_place(plate)
         Look.save(out / "spectrum.npy", plate, o)
     look = Look(plate, o.kept_pitch, cone=o.cone, reference=o.reference)
     print(f"its spectrum saved: {time.time() - start:.1f} s", flush=True)
