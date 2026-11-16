@@ -70,15 +70,15 @@ def ball():
     return points, normals, albedo, np.full(len(points), GLOSS)
 
 
-def wall(z=WALL_Z, half=WALL_HALF, light=1.0, dark=0.25):
-    """Points on a grid over a wall at z, `half` either way, checkered
-    `light` and `dark`."""
-    g = np.arange(-half, half + SPACING / 2, SPACING)
+def wall(z=WALL_Z, half=WALL_HALF, light=1.0, dark=0.25, spacing=SPACING, check=CHECK):
+    """Points on a grid `spacing` apart over a wall at z, `half` either
+    way, checkered `light` and `dark` in squares `check` across."""
+    g = np.arange(-half, half + spacing / 2, spacing)
     x, y = (a.ravel() for a in np.meshgrid(g, g))
     points = np.column_stack([x, y, np.full(len(x), z)])
     normals = np.tile([0.0, 0.0, 1.0], (len(x), 1))
-    check = (np.floor(x / CHECK) + np.floor(y / CHECK)).astype(int) % 2
-    albedo = np.where(check == 0, light, dark)
+    square = (np.floor(x / check) + np.floor(y / check)).astype(int) % 2
+    albedo = np.where(square == 0, light, dark)
     return points, normals, albedo, np.zeros(len(x))
 
 
@@ -154,11 +154,12 @@ def maps(world, points, normals, albedo, gloss, chunk=4000):
     return out.reshape(len(points), MAP, MAP)
 
 
-def render(name, parts, world, focus):
+def render(name, parts, world, focus, plate_size=PLATE["size"]):
     """Makes the hologram of a scene and the eye's views of it, into
     out/<name>: `parts` maps a name to each part's points, normals,
     albedo and gloss (see ball and wall), `world` is the scene as Mitsuba
     sees it, and `focus` maps a name to each depth the eye focuses at.
+    The plate is `plate_size` pixels square, PLATE's pitch apart.
     Saves the plate's light, lit by the reference beam again (replay.npy,
     for the viewer), and a sheet of views (views.png)."""
     import cupy as cp
@@ -182,8 +183,9 @@ def render(name, parts, world, focus):
     start = time.time()
     rng = np.random.default_rng(1)
     phases = rng.uniform(0, 2 * math.pi, len(points))
-    plate = GpuPlate(**PLATE)
-    seen = SeenPoints(**PLATE, points=points[alive], maps=cp.asarray(light[alive]), cone=CONE)
+    size = dict(PLATE, size=plate_size)
+    plate = GpuPlate(**size)
+    seen = SeenPoints(**size, points=points[alive], maps=cp.asarray(light[alive]), cone=CONE)
     plate.light = seen.light(phases[alive])
     cp.cuda.Device().synchronize()
     plate.finish()
@@ -197,7 +199,8 @@ def render(name, parts, world, focus):
     for where, direction in VIEWS.items():
         for label, depth in focus.items():
             view = eye.view(direction, PUPIL, depth)
-            tiles.append((f"looking {where}, focused {label}", picture(view, plate.pitch, half=900)))
+            half = 0.44 * plate.size * plate.pitch
+            tiles.append((f"looking {where}, focused {label}", picture(view, plate.pitch, half=half, shrink=4 * plate.size // PLATE["size"])))
     sheet(tiles).save(out / "views.png")
     print(f"eye's views: {time.time() - start:.1f} s; wrote {out}/views.png and replay.npy")
 

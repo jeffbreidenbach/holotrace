@@ -11,8 +11,12 @@ Mitsuba traces the scene; the waves are summed separately.
     holotrace solid       step 3: a solid scene across the plate, hidden
                           surfaces and shadows from Mitsuba (GPU only)
     holotrace benchy      3DBenchy, the 3D printing test boat, as in step 3
+                          (--scale S, --spacing D: see benchy.py)
     holotrace view NAME   a movie of the eye moving and refocusing, from
-                          out/NAME/replay.npy (from solid or benchy)
+                          out/NAME/replay.npy (from solid or benchy;
+                          --light laser or led: see viewer.py)
+    holotrace compare NAME...
+                          the scenes side by side, by laser and by LED
     holotrace speckle     step 4: the solid scene with each point's phase
                           optimized against speckle (GPU only; --check
                           checks its gradient)
@@ -86,6 +90,10 @@ def main() -> None:
         from .viewer import main as view
 
         view()
+    elif command == "compare":
+        from .viewer import compare
+
+        compare()
     elif command == "speckle":
         from .speckle import main as speckle
 

@@ -1,9 +1,15 @@
 """3DBenchy, the 3D printing test boat, as a hologram.
 
+    holotrace benchy [--scale S] [--spacing D]
+
+makes it S times as big (default 1), on a plate S times as wide, with
+its surface sampled into points D um apart (default solid.SPACING). The
+results go to out/benchy-<width>mm-<D>um.
+
 The boat (scenes/3dbenchy, public domain since 2025), scaled to about
 1.7 mm long, stands upright, turned 30 degrees to show its bow, its
-middle 100 um behind the plate, so that the plate cuts through it: the
-bow is in front of the plate, the stern behind. Behind it is the
+middle on the plate, so that the plate cuts through it: the bow is in
+front of the plate, the stern behind. Behind it is the
 checkered wall. As in step 3 (solid.py), its surface is sampled into
 points, and Mitsuba works out what each sees and is lit by: through the
 cabin's windows and doorways, the boat hides itself and the wall in
@@ -12,6 +18,7 @@ go to out/benchy (see the viewer, viewer.py).
 """
 
 import math
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -22,32 +29,32 @@ from .meshes import read_stl, sample
 STL = Path("scenes/3dbenchy/3DBenchy.stl")
 LENGTH = 1700.0  # um
 TURN = math.radians(30)
-MIDDLE_Z = -100.0
+MIDDLE_Z = 0.0
 WALL_Z = -800.0
 ALBEDO, GLOSS = 0.85, 0.25
 FOCUS = {"on the bow": -250.0, "on the wall": -WALL_Z}
 
 
-def boat():
-    """The boat's triangles, in the scene: upright (the file's z is up,
-    the scene's y), its length along x turned by TURN about the vertical,
-    its middle at MIDDLE_Z."""
+def boat(scale=1.0):
+    """The boat's triangles, in the scene, `scale` times as big: upright
+    (the file's z is up, the scene's y), its length along x turned by TURN
+    about the vertical, its middle at MIDDLE_Z (times scale)."""
     t = read_stl(STL)
     v = t.reshape(-1, 3)
-    scale = LENGTH / (v[:, 0].max() - v[:, 0].min())
+    size = scale * LENGTH / (v[:, 0].max() - v[:, 0].min())
     middle = (v.min(axis=0) + v.max(axis=0)) / 2
-    x, y, z = ((v - middle) * scale).T
+    x, y, z = ((v - middle) * size).T
     # File (x along, y across, z up) to scene (x, y up, z toward the
     # viewer): a rotation, not a reflection, which would turn the faces
     # inside out. Then turned about the vertical.
     across = -y
     c, s = math.cos(TURN), math.sin(TURN)
-    scene = np.column_stack([c * x + s * across, z, -s * x + c * across + MIDDLE_Z])
+    scene = np.column_stack([c * x + s * across, z, -s * x + c * across + scale * MIDDLE_Z])
     return scene.reshape(-1, 3, 3)
 
 
-def world(triangles):
-    """The boat and the wall as Mitsuba sees them."""
+def world(triangles, scale=1.0):
+    """The boat and the wall as Mitsuba sees them, `scale` times as big."""
     import mitsuba as mi
 
     from .mesh import _mitsuba
@@ -58,14 +65,26 @@ def world(triangles):
     params["vertex_positions"] = mi.Float(triangles.astype(np.float32).ravel())
     params["faces"] = mi.UInt32(np.arange(3 * len(triangles), dtype=np.uint32))
     params.update()
-    at = mi.ScalarTransform4f().translate([0, 0, WALL_Z]).scale([solid.WALL_HALF, solid.WALL_HALF, 1])
+    half = scale * solid.WALL_HALF
+    at = mi.ScalarTransform4f().translate([0, 0, scale * WALL_Z]).scale([half, half, 1])
     return mi.load_dict({"type": "scene", "boat": mesh, "wall": {"type": "rectangle", "to_world": at}})
 
 
+def _option(name, default):
+    if name in sys.argv:
+        return float(sys.argv[sys.argv.index(name) + 1])
+    return default
+
+
 def main():
-    triangles = boat()
-    points, normals = sample(triangles, solid.SPACING, np.random.default_rng(3))
+    scale = _option("--scale", 1.0)
+    spacing = _option("--spacing", solid.SPACING)
+    triangles = boat(scale)
+    points, normals = sample(triangles, spacing, np.random.default_rng(3))
     hull = (points, normals, np.full(len(points), ALBEDO), np.full(len(points), GLOSS))
     # A dim wall, so that the boat stands out against it.
-    parts = {"boat": hull, "wall": solid.wall(z=WALL_Z, light=0.3, dark=0.1)}
-    solid.render("benchy", parts, world(triangles), FOCUS)
+    wall = solid.wall(z=scale * WALL_Z, half=scale * solid.WALL_HALF, light=0.3, dark=0.1, spacing=spacing, check=scale * solid.CHECK)
+    focus = {k: scale * v for k, v in FOCUS.items()}
+    size = round(solid.PLATE["size"] * scale)
+    name = f"benchy-{size * solid.PLATE['pitch'] / 1000:g}mm-{spacing:g}um"
+    solid.render(name, {"boat": hull, "wall": wall}, world(triangles, scale), focus, plate_size=size)
