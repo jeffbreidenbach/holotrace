@@ -74,19 +74,8 @@ class Look:
         self.width = self.n * PLATE["pitch"]
 
     @classmethod
-    def from_replay(cls, replay, light=LASER):
-        """From the plate's light, lit by the reference beam again; the
-        array may be reused."""
-        import scipy.fft
-
-        return cls(scipy.fft.fft2(replay, workers=-1, overwrite_x=True).astype(np.complex64, copy=False), light)
-
-    @classmethod
     def load(cls, path, light=LASER):
         return cls(np.load(path, mmap_mode="r"), light)
-
-    def save(self, path):
-        np.save(path, self.spectrum)
 
     def view(self, direction, pupil, depth):
         """The brightness across the plane `depth` behind the plate, seen
