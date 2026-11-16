@@ -8,6 +8,8 @@ Mitsuba traces the scene; the waves are summed separately.
                           the lens traced exactly, no Mitsuba yet
     holotrace mesh        step 2: the same, the lens a mesh traced by
                           Mitsuba, against the exact one
+    holotrace solid       step 3: a solid scene across the plate, hidden
+                          surfaces and shadows from Mitsuba (GPU only)
     holotrace gpucheck    checks the GPU's sum against the CPU's
 
 Add --gpu to magnifier or mesh to sum the light on an NVIDIA GPU.
@@ -21,12 +23,29 @@ import sys
 VARIANTS = ["cuda_ad_mono", "llvm_ad_mono", "scalar_mono"]
 
 
+def _gpu_can_trace() -> bool:
+    """Whether there is an NVIDIA GPU new enough for Mitsuba (compute
+    capability 7.5). Asked of nvidia-smi, not Mitsuba: on an older card,
+    Mitsuba's GPU variant can hang starting up instead of failing."""
+    import subprocess
+
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=10,
+        ).stdout
+        return any(float(line) >= 7.5 for line in out.split())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+
+
 def use_best_variant() -> str:
     """Selects the fastest Mitsuba variant that works here, and returns it."""
     import mitsuba as mi
 
+    gpu = _gpu_can_trace()
     for variant in VARIANTS:
-        if variant not in mi.variants():
+        if variant not in mi.variants() or (variant.startswith("cuda") and not gpu):
             continue
         try:
             mi.set_variant(variant)
@@ -49,6 +68,10 @@ def main() -> None:
         from .meshed import main as meshed
 
         meshed(gpu)
+    elif command == "solid":
+        from .solid import main as solid
+
+        solid()
     elif command == "gpucheck":
         from .gpucheck import main as gpucheck
 

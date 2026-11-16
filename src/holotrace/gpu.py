@@ -62,6 +62,40 @@ extern "C" __global__ void direct(
     light[row * size + col] += complex<float>(strength * c, strength * s);
 }
 
+// The light straight from a point `depth` behind the plate (in front, if
+// negative: its light converges through the plate onto it, so its path
+// to the plate is negative), as bright in each direction as `map` says:
+// its amplitude over an n x n grid of tangents from -cone to cone. The
+// window and phase are as for `direct`.
+extern "C" __global__ void seen(
+    complex<float>* light, int size, float pitch, float k,
+    int x0, int y0, int nx, int ny,
+    float px, float py, float depth, float phase, float cone,
+    const float* map, int n)
+{
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int j = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i >= nx || j >= ny) return;
+    int col = x0 + i, row = y0 + j;
+    // The light's direction, as tangents, the same either side.
+    float tx = (coordinate(col, size, pitch) - px) / depth;
+    float ty = (coordinate(row, size, pitch) - py) / depth;
+    float t2 = tx * tx + ty * ty;
+    if (t2 >= cone * cone) return;
+    float u = (tx + cone) / (2 * cone) * (n - 1), v = (ty + cone) / (2 * cone) * (n - 1);
+    int iu = min((int)u, n - 2), iv = min((int)v, n - 2);
+    float au = u - iu, av = v - iv;
+    const float* m = map + iv * n + iu;
+    float bright = m[0] * (1 - au) * (1 - av) + m[1] * au * (1 - av)
+                 + m[n] * (1 - au) * av + m[n + 1] * au * av;
+    if (bright <= 0) return;
+    float extra = depth * t2 / (sqrtf(1.0f + t2) + 1.0f);
+    float strength = bright * powf(1.0f + t2, -0.75f) / fabsf(depth);
+    float s, c;
+    sincosf(k * extra + phase, &s, &c);
+    light[row * size + col] += complex<float>(strength * c, strength * s);
+}
+
 // The light of a point through the lens, its path lengths (less the
 // part in `phase`), their slopes and cross slopes, strengths, where the
 // rays crossed the lens and which were found given on a gnx x gny grid
@@ -167,6 +201,31 @@ class GpuPlate(Plate):
                 np.int32(lens is not None),
                 f32(0 if lens is None else (lens.z - pz) / depth),
                 f32(0 if lens is None else lens.aperture**2),
+            ),
+        )
+
+    def add_seen(self, point, phase, cone, maps, index):
+        """Adds the light of `point`, behind the plate or in front of it,
+        that a viewer would see: as bright in each direction as its map,
+        `maps[index]` (an n x n grid of amplitudes over tangents from
+        -cone to cone, on the GPU)."""
+        px, py, pz = point
+        depth = -pz
+        found = self.window((px, py), cone * abs(depth))
+        if found is None:
+            return
+        (rows, cols), _, _ = found
+        nx, ny = cols.stop - cols.start, rows.stop - rows.start
+        start = (self.k * depth + phase) % (2 * math.pi)
+        f32 = np.float32
+        _kernel("seen")(
+            _blocks(nx, ny),
+            _BLOCK,
+            (
+                self.light, np.int32(self.size), f32(self.pitch), f32(self.k),
+                np.int32(cols.start), np.int32(rows.start), np.int32(nx), np.int32(ny),
+                f32(px), f32(py), f32(depth), f32(start), f32(cone),
+                maps[index], np.int32(maps.shape[1]),
             ),
         )
 

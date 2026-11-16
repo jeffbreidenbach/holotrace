@@ -50,6 +50,7 @@ light on an NVIDIA GPU with CuPy, many times faster:
 
 ```
 uv run --extra gpu holotrace mesh --gpu
+uv run --extra gpu holotrace solid      # step 3: a solid scene across the plate
 uv run --extra gpu holotrace gpucheck   # the GPU's sum against the CPU's
 ```
 
