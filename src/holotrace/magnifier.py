@@ -59,15 +59,107 @@ def dots():
     return np.array(points, float)
 
 
+# Each worker's lens, made once: LENS itself, or traced by Mitsuba as a
+# mesh of the given number of rings (see mesh.py).
+_lenses = {}
+
+
+def _lens(rings, alone=False):
+    """The lens; `alone` if this process is the only one tracing, so
+    Mitsuba may use every core."""
+    if rings is None:
+        return LENS
+    if rings not in _lenses:
+        from .mesh import MeshLens, _mitsuba
+
+        # Mitsuba first: Dr.Jit loaded alone hangs.
+        _mitsuba()
+        if not alone:
+            import drjit as dr
+
+            # The workers already use every core between them.
+            dr.set_thread_count(1)
+        _lenses[rings] = MeshLens(LENS, rings)
+    return _lenses[rings]
+
+
 def _light_from(args):
-    """The plate's light from some of the dots."""
-    points, phases = args
+    """The plate's light from some of the dots, worker `n`'s share; it
+    reports how long each part took."""
+    n, points, phases, rings = args
+    lens = _lens(rings)
     plate = Plate(**PLATE)
+    start = time.time()
     for point, phase in zip(points, phases):
         plate.add_direct(point, phase, CONE, LENS)
-        if np.hypot(point[0], point[1]) < 500:
-            plate.add_through_lens(point, phase, CONE, LENS)
+    direct = time.time() - start
+    near = np.hypot(points[:, 0], points[:, 1]) < 500
+    plate.add_through_lens(points[near], phases[near], CONE, lens)
+    print(
+        f"  worker {n}: {len(points)} dots' direct light in {direct:.0f} s, "
+        f"{near.sum()} through the lens in {time.time() - start - direct:.0f} s",
+        flush=True,
+    )
     return plate.light
+
+
+def sum_light(rings=None, gpu=False):
+    """The plate with all the dots' light on it, through the lens as it
+    is, or (with rings) as a mesh traced by Mitsuba: summed on the CPU's
+    cores, or the GPU (see gpu.py). Prints how long it took."""
+    points = dots()
+    rng = np.random.default_rng(1)
+    phases = rng.uniform(0, 2 * math.pi, len(points))
+    lens = "the true lens" if rings is None else f"a mesh of {rings} rings"
+    if gpu:
+        return _sum_on_gpu(points, phases, rings, lens)
+    workers = os.cpu_count() or 1
+    chunks = [(i, points[i::workers], phases[i::workers], rings) for i in range(workers)]
+    print(f"summing {len(points)} dots' light through {lens} on {workers} workers", flush=True)
+    start = time.time()
+    plate = Plate(**PLATE)
+    with ProcessPoolExecutor(workers) as pool:
+        for light in pool.map(_light_from, chunks):
+            plate.light += light
+    print(f"summed on {plate.size}^2 pixels in {time.time() - start:.0f} s", flush=True)
+    return plate
+
+
+# On the GPU, path lengths through the lens are blended by cubics, from a
+# grid this many pixels apart.
+GPU_COARSE = 32
+
+
+def _sum_on_gpu(points, phases, rings, lens_name):
+    import cupy as cp
+
+    from .gpu import GpuPlate
+
+    print(f"summing {len(points)} dots' light through {lens_name} on the GPU", flush=True)
+    lens = _lens(rings, alone=True)
+    plate = GpuPlate(**PLATE)
+    start = time.time()
+    for point, phase in zip(points, phases):
+        plate.add_direct(point, phase, CONE, LENS)
+    cp.cuda.Device().synchronize()
+    direct = time.time() - start
+    near = np.hypot(points[:, 0], points[:, 1]) < 500
+    plate.add_through_lens(points[near], phases[near], CONE, lens, coarse=GPU_COARSE)
+    plate.finish()
+    print(
+        f"summed on {plate.size}^2 pixels: {len(points)} dots' direct light in {direct:.1f} s, "
+        f"{near.sum()} through the lens in {time.time() - start - direct:.1f} s",
+        flush=True,
+    )
+    return plate
+
+
+def replay(plate):
+    """The hologram of the plate's light, lit by the reference beam again:
+    it sends out the scene's light, with the rest heading off in other
+    directions."""
+    hologram, reference = plate.hologram(REFERENCE)
+    return hologram * reference / np.abs(reference) ** 2
 
 
 def predict():
@@ -78,7 +170,7 @@ def predict():
         point = np.array([height, 0.0, DOTS_Z])
         tangent = height / (LENS.z - DOTS_Z)
         rays = np.array([[tangent - 1e-4, 0.0], [tangent + 1e-4, 0.0]])
-        end, _, out, _ = LENS.trace(point, rays)
+        end, _, out, _, _ = LENS.trace(point, rays)
         # Where the two rays, run back from the plate, cross.
         depth = -(end[1, 0] - end[0, 0]) / (out[1, 0] - out[0, 0])
         if height == 0:
@@ -123,7 +215,7 @@ def picture(view, pitch, half=700, shrink=4):
     return Image.fromarray((np.clip(patch, 0, 1) * 255).astype(np.uint8))
 
 
-def main():
+def main(gpu=False):
     OUT.mkdir(parents=True, exist_ok=True)
     image_depth, magnification = predict()
     print(f"lens: {LENS.thickness:.1f} um thick")
@@ -132,23 +224,8 @@ def main():
         f"{magnification:.3f} times magnified"
     )
 
-    points = dots()
-    rng = np.random.default_rng(1)
-    phases = rng.uniform(0, 2 * math.pi, len(points))
-    workers = os.cpu_count() or 1
-    chunks = [(points[i::workers], phases[i::workers]) for i in range(workers)]
-    start = time.time()
-    plate = Plate(**PLATE)
-    with ProcessPoolExecutor(workers) as pool:
-        for light in pool.map(_light_from, chunks):
-            plate.light += light
-    print(f"summed {len(points)} dots' light on {plate.size}^2 pixels in {time.time() - start:.0f} s")
-
-    hologram, reference = plate.hologram(REFERENCE)
-    # Lit by the reference beam again, the hologram sends out the scene's
-    # light, with the rest heading off in other directions.
-    replay = hologram * reference / np.abs(reference) ** 2
-    eye = Eye(replay, plate.pitch, WAVELENGTH)
+    plate = sum_light(gpu=gpu)
+    eye = Eye(replay(plate), plate.pitch, WAVELENGTH)
     exact = Eye(plate.light, plate.pitch, WAVELENGTH)
 
     # How sharp the middle, through the lens, is at each depth.

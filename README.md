@@ -33,17 +33,27 @@ check it before anything is printed.
    pattern looks magnified and sharp, and the magnification changes as the
    eye moves.
 2. The same test with the scene traced by Mitsuba.
-3. Scale up: tiling, real meshes from Blender, a car part, then a car.
+3. Scale up: tiling, real meshes and materials from Blender, then a real
+   scene.
 4. Choose the output medium, which fixes the pixel pitch and encoding.
 
 ## Running
 
 ```
-uv run holotrace
+uv run holotrace check        # Mitsuba works and can measure how far rays go
+uv run holotrace magnifier    # step 1: a hologram of a magnifying glass
+uv run holotrace mesh         # step 2: the lens as a mesh traced by Mitsuba
 ```
 
-checks that Mitsuba works and can measure how far rays go.
+Results go to `out/`. Add `--gpu` to `magnifier` or `mesh` to sum the
+light on an NVIDIA GPU with CuPy, many times faster:
 
-Mitsuba runs on the GPU only on NVIDIA cards of compute capability 7.5 or
-newer (Turing onward); on older cards and other machines it runs on the
-CPU, more slowly.
+```
+uv run --extra gpu holotrace mesh --gpu
+uv run --extra gpu holotrace gpucheck   # the GPU's sum against the CPU's
+```
+
+Mitsuba itself runs on the GPU only on NVIDIA cards of compute
+capability 7.5 or newer (Turing onward); on older cards and other
+machines it runs on the CPU, more slowly. The GPU sum (CuPy) works on
+older cards too.

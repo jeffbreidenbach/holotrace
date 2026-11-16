@@ -17,7 +17,7 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
-from .lens import Lens
+from .lens import Aimed, Lens
 
 
 @dataclass
@@ -80,13 +80,39 @@ class Plate:
         wave = strength * np.exp(1j * (self.k * distance + phase))
         self.light[where] += np.where(reach, wave, 0)
 
-    def add_through_lens(self, point, phase, cone, lens: Lens, coarse=16):
-        """Adds the light of `point` that reaches the plate through `lens`.
+    def add_through_lens(self, points, phases, cone, lens, coarse=16):
+        """Adds the light of `points` (N x 3), with their starting `phases`,
+        that reaches the plate through `lens` (a Lens, or one traced like
+        it).
 
         The ray to each pixel is found exactly, by aiming through the lens
         (see Lens.aim), on a grid `coarse` pixels apart, and its path
         length and strength interpolated in between: they change so slowly
-        that over 8 um the error is a nanometre or so."""
+        that over 8 um the error is a nanometre or so. The rays for every
+        point are aimed together, since tracing a few large batches is far
+        faster than many small ones."""
+        grids = [self._lens_grid(point, lens, coarse) for point in points]
+        used = [i for i, grid in enumerate(grids) if grid is not None]
+        if not used:
+            return
+        counts = [len(grids[i]["targets"]) for i in used]
+        origins = np.concatenate(
+            [np.broadcast_to(points[i], (n, 3)) for i, n in zip(used, counts)]
+        )
+        targets = np.concatenate([grids[i]["targets"] for i in used])
+        guess = np.concatenate([grids[i]["guess"] for i in used])
+        aimed = lens.aim(origins, targets, guess)
+        bounds = np.cumsum([0] + counts)
+        for k, i in enumerate(used):
+            part = slice(bounds[k], bounds[k + 1])
+            mine = Aimed(*(a[part] for a in aimed))
+            self._add_lens_grid(grids[i], phases[i], cone, mine, lens.aperture)
+
+    def _lens_grid(self, point, lens, coarse):
+        """The grid of points across the plate the rays from `point`
+        through `lens` are aimed at, `coarse` pixels apart, covering where
+        its light lands, and a first guess at each ray; or None if its
+        light misses the plate."""
         px, py, pz = point
         # Where the light lands, roughly: as if from the lens's virtual
         # image of the point (thin lens), through its rim.
@@ -99,12 +125,14 @@ class Plate:
         image_z = lens.z - after
         spread = -image_z / (lens.z - image_z)
         center = image * (1 - spread)
-        found = self.window(center, 1.05 * lens.aperture * spread)
+        # Out to where the faces are traced, beyond the rim, so the grid
+        # reaches past the rim's edge.
+        found = self.window(center, lens.extent * spread)
         if found is None:
-            return
+            return None
         where, x, y = found
 
-        # The grid the rays are found on, covering the window.
+        # The grid, covering the window.
         step = coarse * self.pitch
         x0, y0 = x[0, 0], y[0, 0]
         nx = math.ceil((x[0, -1] - x0) / step) + 2
@@ -114,22 +142,28 @@ class Plate:
         # Aim at each through the line from the virtual image.
         through = image + (targets - image) * (lens.z - image_z) / -image_z
         guess = (through - [px, py]) / before
-        path, leave, arrive, spreading, ok = lens.aim(point, targets, guess)
-        ok &= np.einsum("ij,ij->i", arrive, arrive) < cone**2
-        # Light per unit of solid angle is cos^3 per unit of tangent.
-        strength = np.sqrt((1 + np.einsum("ij,ij->i", leave, leave)) ** -1.5 / spreading)
-        path = np.where(ok, path, 0).reshape(ny, nx)
-        strength = np.where(ok, strength, 0).reshape(ny, nx)
-        ok = ok.reshape(ny, nx)
+        return dict(
+            where=where, x=x, y=y, coarse=coarse, step=step, shape=(ny, nx), targets=targets, guess=guess
+        )
+
+    def _add_lens_grid(self, grid, phase, cone, aimed, aperture):
+        """Adds the light whose rays were aimed at `grid` (see _lens_grid):
+        `aimed`, through a lens of `aperture`."""
+        ny, nx = grid["shape"]
+        ok = aimed.found
+        values = self._lens_values(aimed, ok)
+        path = np.where(ok, aimed.path, 0)
 
         # Interpolate to every pixel in the window, where all four corners
         # around it were found.
-        fx = (x - x0) / step
-        fy = (y - y0) / step
+        x, y, step = grid["x"], grid["y"], grid["step"]
+        fx = (x - x[0, 0]) / step
+        fy = (y - y[0, 0]) / step
         ix, iy = np.floor(fx).astype(int), np.floor(fy).astype(int)
         ax, ay = fx - ix, fy - iy
 
         def blend(a):
+            a = a.reshape(ny, nx)
             return (
                 a[iy, ix] * (1 - ax) * (1 - ay)
                 + a[iy, ix + 1] * ax * (1 - ay)
@@ -137,9 +171,35 @@ class Plate:
                 + a[iy + 1, ix + 1] * ax * ay
             )
 
-        reach = ok[iy, ix] & ok[iy, ix + 1] & ok[iy + 1, ix] & ok[iy + 1, ix + 1]
-        wave = blend(strength) * np.exp(1j * (self.k * blend(path) + phase))
-        self.light[where] += np.where(reach, wave, 0)
+        g = ok.reshape(ny, nx)
+        reach = (
+            g[iy, ix]
+            & g[iy, ix + 1]
+            & g[iy + 1, ix]
+            & g[iy + 1, ix + 1]
+            & (blend(values["rim"]) <= aperture)
+            & (blend(values["gx"]) ** 2 + blend(values["gy"]) ** 2 < cone**2 / (1 + cone**2))
+        )
+        wave = blend(values["strength"]) * np.exp(1j * (self.k * blend(path) + phase))
+        self.light[grid["where"]] += np.where(reach, wave, 0)
+
+    @staticmethod
+    def _lens_values(aimed, ok):
+        """What is blended between the rays aimed through the lens, 0 where
+        `ok` is not: how strong the light is where each lands (light per
+        unit of solid angle is cos^3 per unit of tangent, spread over the
+        area the lens spreads it to); the slopes of the path length across
+        the plate, which are the sines of its direction (gx, gy); and how
+        far from the axis it crossed the lens (rim)."""
+        with np.errstate(all="ignore"):
+            strength = np.sqrt((1 + np.einsum("ij,ij->i", aimed.leave, aimed.leave)) ** -1.5 / aimed.spreading)
+        sines = aimed.arrive / np.sqrt(1 + np.einsum("ij,ij->i", aimed.arrive, aimed.arrive))[:, None]
+        return {
+            "strength": np.where(ok, strength, 0),
+            "gx": np.where(ok, sines[:, 0], 0),
+            "gy": np.where(ok, sines[:, 1], 0),
+            "rim": np.where(ok, aimed.rim, 0),
+        }
 
     def hologram(self, reference_tangent, beam_ratio=2.0):
         """The pattern the plate records: the brightness where the scene's

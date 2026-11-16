@@ -6,6 +6,11 @@ Mitsuba traces the scene; the waves are summed separately.
                           far rays go, which the waves' phases come from
     holotrace magnifier   step 1: a hologram of a magnifying glass, with
                           the lens traced exactly, no Mitsuba yet
+    holotrace mesh        step 2: the same, the lens a mesh traced by
+                          Mitsuba, against the exact one
+    holotrace gpucheck    checks the GPU's sum against the CPU's
+
+Add --gpu to magnifier or mesh to sum the light on an NVIDIA GPU.
 """
 
 import sys
@@ -35,10 +40,19 @@ def use_best_variant() -> str:
 
 def main() -> None:
     command = sys.argv[1] if len(sys.argv) > 1 else "check"
+    gpu = "--gpu" in sys.argv[2:]
     if command == "magnifier":
         from .magnifier import main as magnifier
 
-        magnifier()
+        magnifier(gpu)
+    elif command == "mesh":
+        from .meshed import main as meshed
+
+        meshed(gpu)
+    elif command == "gpucheck":
+        from .gpucheck import main as gpucheck
+
+        gpucheck()
     elif command == "check":
         check()
     else:

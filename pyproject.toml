@@ -13,6 +13,11 @@ dependencies = [
 [project.scripts]
 holotrace = "holotrace:main"
 
+[project.optional-dependencies]
+gpu = [
+    "cupy-cuda12x[ctk]>=14.2.0",
+]
+
 [build-system]
 requires = ["uv_build>=0.13.5,<0.14.0"]
 build-backend = "uv_build"

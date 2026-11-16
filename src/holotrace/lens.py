@@ -5,35 +5,55 @@ travels toward +z: from the scene, through the lens, to the plate.
 
 A direction is given by its tangent (dx/dz, dy/dz), which is convenient
 because every ray here travels forward.
+
+Rays are traced through the lens's faces a little beyond its rim, as if
+the glass went on (to Lens.extent): the light just inside the rim is
+then known smoothly up to it, from either side, and what is outside is
+cut off by where each ray crosses, its `rim` radius (see Aimed).
 """
 
 from dataclasses import dataclass
+from typing import NamedTuple
 
 import numpy as np
 
 
 @dataclass(frozen=True)
 class Lens:
-    """A biconvex lens: two spherical faces of `radius`, meeting in a sharp
-    rim `aperture` from the axis, its middle at height z along it."""
+    """A biconvex lens: two spherical faces of `radius`, out to its rim
+    `aperture` from the axis, where its edge is `edge` thick (blackened);
+    its middle at height z along the axis."""
 
     z: float
     radius: float
     aperture: float
     index: float = 1.5
+    edge: float = 20.0
+
+    def sag(self, r):
+        """How far each face curves in from its middle, r from the axis."""
+        return self.radius - np.sqrt(self.radius**2 - np.asarray(r) ** 2)
 
     @property
     def thickness(self) -> float:
         """How thick the lens is at its middle."""
-        sag = self.radius - np.sqrt(self.radius**2 - self.aperture**2)
-        return 2 * sag
+        return float(2 * self.sag(self.aperture) + self.edge)
+
+    @property
+    def extent(self) -> float:
+        """How far from the axis the faces are traced: beyond the rim,
+        nine tenths of the way to where, going on, they would meet."""
+        meet = np.sqrt(self.radius**2 - (self.radius - self.thickness / 2) ** 2)
+        return float(self.aperture + 0.9 * (meet - self.aperture))
 
     def trace(self, origin, tangents, z_end=0.0):
-        """Traces rays from `origin` (x, y, z) in the directions `tangents`
-        (M x 2) through both faces, refracting at each, to the plane at
-        z_end. Returns where they land (M x 2), the optical path length of
-        each (the distance, counted index times over in glass), their
-        tangents after the lens (M x 2), and which got through the lens."""
+        """Traces rays from `origin` (x, y, z, or one per ray) in the
+        directions `tangents` (M x 2) through both faces, refracting at
+        each, to the plane at z_end. Returns where they land (M x 2), the
+        optical path length of each (the distance, counted index times
+        over in glass), their tangents after the lens (M x 2), which got
+        through the faces as traced (out to `extent`), and how far from the
+        axis each crossed them (beyond `aperture`, the edge stops it)."""
         d = np.column_stack([tangents, np.ones(len(tangents))])
         d /= np.linalg.norm(d, axis=1, keepdims=True)
         o = np.broadcast_to(np.asarray(origin, float), d.shape)
@@ -56,50 +76,75 @@ class Lens:
         s3 = (z_end - p2[:, 2]) / d2[:, 2]
         end = p2 + s3[:, None] * d2
         path = s1 + self.index * s2 + s3
-        rim2 = self.aperture**2
-        valid = (
-            hit1
-            & hit2
-            & ok1
-            & ok2
-            & (p1[:, 0] ** 2 + p1[:, 1] ** 2 <= rim2)
-            & (p2[:, 0] ** 2 + p2[:, 1] ** 2 <= rim2)
-            & (d2[:, 2] > 0)
-        )
-        return end[:, :2], path, d2[:, :2] / d2[:, 2:], valid
+        rim = np.maximum(np.hypot(p1[:, 0], p1[:, 1]), np.hypot(p2[:, 0], p2[:, 1]))
+        valid = hit1 & hit2 & ok1 & ok2 & (d2[:, 2] > 0) & (rim <= self.extent)
+        return end[:, :2], path, d2[:, :2] / d2[:, 2:], valid, rim
 
-    def aim(self, origin, targets, guess, z_end=0.0, iterations=10):
-        """Finds, for each of `targets` (M x 2) on the plane at z_end, the
-        ray from `origin` through the lens that lands there, by Newton's
-        method from the tangents `guess`. Returns, for each, its optical
-        path length, the tangent it leaves `origin` with and the one it
-        arrives with, how much the lens spreads the light there (the area
-        on the plane per unit of tangent), and whether it was found."""
-        t = np.array(guess, float)
-        step = 1e-6
-        dx, dy = np.array([step, 0.0]), np.array([0.0, step])
-        with np.errstate(all="ignore"):
-            for _ in range(iterations + 1):
-                end, path, out, valid = self.trace(origin, t, z_end)
-                ex = self.trace(origin, t + dx, z_end)[0]
-                ey = self.trace(origin, t + dy, z_end)[0]
-                # How the landing point moves with the tangent.
-                j = np.stack([(ex - end) / step, (ey - end) / step], axis=2)
-                det = j[:, 0, 0] * j[:, 1, 1] - j[:, 0, 1] * j[:, 1, 0]
-                miss = targets - end
-                if _ == iterations:
-                    break
-                # Solve j @ change = miss, 2 x 2 at a time.
-                change = np.stack(
-                    [
-                        (j[:, 1, 1] * miss[:, 0] - j[:, 0, 1] * miss[:, 1]) / det,
-                        (j[:, 0, 0] * miss[:, 1] - j[:, 1, 0] * miss[:, 0]) / det,
-                    ],
-                    axis=1,
-                )
-                t += np.nan_to_num(change)
-        found = valid & (np.hypot(miss[:, 0], miss[:, 1]) < 1e-4) & np.isfinite(det)
-        return path, t, out, np.abs(det), found
+    def aim(self, origin, targets, guess, z_end=0.0):
+        """Finds the rays from `origin` through the lens that land on
+        `targets` (see aim)."""
+        return aim(self.trace, origin, targets, guess, z_end, step=1e-6)
+
+
+class Aimed(NamedTuple):
+    """Rays aimed at points on the plate (see aim)."""
+
+    path: np.ndarray  # optical path length to the point
+    leave: np.ndarray  # tangent leaving the source
+    arrive: np.ndarray  # tangent arriving at the point
+    spreading: np.ndarray  # area on the plate per unit of tangent
+    found: np.ndarray  # whether a ray was found landing there
+    rim: np.ndarray  # how far from the axis it crossed the lens
+
+
+def aim(trace, origin, targets, guess, z_end=0.0, step=1e-6, iterations=10, tolerance=1e-3):
+    """Finds, for each of `targets` (M x 2) on the plane at z_end, the ray
+    from `origin` that `trace` (as Lens.trace) lands there, by Newton's
+    method from the tangents `guess`, the landing point's change with the
+    tangent found `step` apart. Returns them as Aimed: found means landing
+    within `tolerance`, through the lens as traced, which goes beyond its
+    rim; whether a ray really gets through is whether its `rim` is within
+    the lens's aperture.
+
+    The path length is carried the last little way to the target from
+    where the ray landed along the plane, as the ray's tangent there says
+    it grows (to first order: the path length is least, as Fermat's
+    principle has it, so the error is second order)."""
+    t = np.array(guess, float)
+    dx, dy = np.array([step, 0.0]), np.array([0.0, step])
+    landed = None
+    with np.errstate(all="ignore"):
+        for i in range(iterations + 1):
+            end, path, out, valid, rim = trace(origin, t, z_end)
+            ex = trace(origin, t + dx, z_end)[0]
+            ey = trace(origin, t + dy, z_end)[0]
+            # How the landing point moves with the tangent.
+            j = np.stack([(ex - end) / step, (ey - end) / step], axis=2)
+            det = j[:, 0, 0] * j[:, 1, 1] - j[:, 0, 1] * j[:, 1, 0]
+            miss = targets - end
+            # Stop once no more rays are landing: those that will have.
+            # (Newton's method from a good guess lands most in 2 or 3.)
+            close = valid & (np.hypot(miss[:, 0], miss[:, 1]) < tolerance / 10)
+            if i == iterations or (i >= 3 and (close == landed).all()):
+                break
+            landed = close
+            # Solve j @ change = miss, 2 x 2 at a time.
+            change = np.stack(
+                [
+                    (j[:, 1, 1] * miss[:, 0] - j[:, 0, 1] * miss[:, 1]) / det,
+                    (j[:, 0, 0] * miss[:, 1] - j[:, 1, 0] * miss[:, 0]) / det,
+                ],
+                axis=1,
+            )
+            # Rays that miss can send the step anywhere; keep it bounded.
+            change = np.nan_to_num(change, nan=0.0, posinf=0.0, neginf=0.0)
+            t = np.clip(t + change, -10.0, 10.0)
+        # Along the plane, the path length grows by the sine of the ray's
+        # angle to it per unit length.
+        sines = out / np.sqrt(1 + np.einsum("ij,ij->i", out, out))[:, None]
+        path = path + np.einsum("ij,ij->i", sines, miss)
+    found = valid & (np.hypot(miss[:, 0], miss[:, 1]) < tolerance) & np.isfinite(det)
+    return Aimed(path, t, out, np.abs(det), found, rim)
 
 
 def _sphere_hit(o, d, center, radius, near):
