@@ -71,28 +71,35 @@ class Look:
     little elsewhere. Each view covers the whole plate, at about half the
     eye's resolution."""
 
-    def __init__(self, spectrum, pitch, light=LASER):
+    def __init__(self, spectrum, pitch, light=LASER, cone=CONE, reference=None):
         self.spectrum = spectrum
         self.light = light
         self.n = spectrum.shape[0]
         self.width = self.n * pitch
+        self.cone = cone
+        # The reference beam's angle, as a sine.
+        self.reference = REFERENCE / math.sqrt(1 + REFERENCE**2) if reference is None else reference
 
     @staticmethod
-    def save(path, spectrum, pitch):
-        """Saves a spectrum, and beside it how far apart its samples are."""
-        np.save(path, spectrum)
-        Path(path).with_suffix(".json").write_text(json.dumps({"pitch": pitch}))
+    def save(path, spectrum, optics):
+        """Saves a spectrum (unless it is None: already in the file), and
+        beside it how far apart its samples are and the optics it was
+        made with (see solid.Optics)."""
+        if spectrum is not None:
+            np.save(path, spectrum)
+        info = {"pitch": optics.kept_pitch, "cone": optics.cone, "reference": optics.reference}
+        Path(path).with_suffix(".json").write_text(json.dumps(info))
 
     @classmethod
     def load(cls, path, light=LASER):
-        pitch = json.loads(Path(path).with_suffix(".json").read_text())["pitch"]
-        return cls(np.load(path, mmap_mode="r"), pitch, light)
+        info = json.loads(Path(path).with_suffix(".json").read_text())
+        return cls(np.load(path, mmap_mode="r"), info["pitch"], light, info.get("cone", CONE), info.get("reference"))
 
     def view(self, direction, pupil, depth):
         """The brightness across the plane `depth` behind the plate, seen
         along `direction` (sines) through a pupil of numerical aperture
         `pupil`: an array covering the whole plate."""
-        sine = REFERENCE / math.sqrt(1 + REFERENCE**2)
+        sine = self.reference
         total = 0
         for offset, tilt in self.light:
             lam = WAVELENGTH + offset
@@ -201,6 +208,7 @@ def main():
     start = time.time()
     look = Look.load(out / "spectrum.npy", LIGHTS[light])
     depths = np.linspace(-400, 900, 27) * look.width / (PLATE["size"] * PLATE["pitch"])
+    cone = look.cone
 
     if distance:
         # A real eye, `distance` mm away, its pupil `--pupil-mm` across,
@@ -208,7 +216,7 @@ def main():
         # reaches it from every part of the plate.
         d = distance * 1000
         radius = _option("--pupil-mm", 4.0) * 500
-        reach = (CONE - radius / d - look.width / 2 / d) * d
+        reach = (cone - radius / d - look.width / 2 / d) * d
         sweep = np.concatenate([np.linspace(-reach, reach, 24), np.linspace(reach, -reach, 24)])
         what = f"{light}, eye {distance:g} mm away"
         shots = [((s, 0.0, d), focus, f"{what}, {s / 1000:+.1f} mm to the side, focused {focus:.0f} um behind") for s in sweep]
@@ -220,7 +228,7 @@ def main():
         # An eye far away, looking along directions across and up and down,
         # as far as the light reaches past the pupil.
         pupil = _option("--pupil", 0.03)
-        reach = CONE - pupil
+        reach = cone - pupil
         sweep = np.concatenate([np.linspace(-reach, reach, 24), np.linspace(reach, -reach, 24)])
         shots = [((s, 0.0), focus, f"{light}, from {s:+.2f} rad side to side, focused {focus:.0f} um behind") for s in sweep]
         shots += [((0.0, s), focus, f"{light}, from {s:+.2f} rad up and down, focused {focus:.0f} um behind") for s in sweep]

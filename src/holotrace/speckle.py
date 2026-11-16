@@ -70,6 +70,10 @@ RATE = 0.1
 HALF = 800.0
 BIN = 8
 
+# Points closer to the plate than this are left out: summed straight onto
+# it, their light would land on a pixel or two.
+NEAREST = 2.0
+
 OUT = Path("out/speckle")
 
 
@@ -80,7 +84,7 @@ class Scene:
         parts = [solid.ball(), solid.wall()]
         points, normals, albedo, gloss = (np.concatenate(a) for a in zip(*parts))
         maps = solid.maps(solid.scene(), points, normals, albedo, gloss)
-        alive = (maps.max(axis=(1, 2)) > 0) & (np.abs(points[:, 2]) >= solid.NEAREST)
+        alive = (maps.max(axis=(1, 2)) > 0) & (np.abs(points[:, 2]) >= NEAREST)
         self.points = points[alive][:limit]
         self.maps = cp.asarray(maps[alive][:limit])
         self._seen = SeenPoints(**PLATE, points=self.points, maps=self.maps, cone=CONE)

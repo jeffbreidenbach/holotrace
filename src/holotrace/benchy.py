@@ -1,12 +1,17 @@
 """3DBenchy, the 3D printing test boat, as a hologram.
 
-    holotrace benchy [--scale S] [--spacing D] [--slab T]
+    holotrace benchy [--scale S] [--spacing D] [--turn A]
+                     [--pixel P --cone C [--slab T]] [--plate W]
 
 makes it S times as big (default 1), on a plate S times as wide, with
 its surface sampled into points D um apart (default solid.SPACING),
-through recording planes every T um (default solid.SLAB; 0 for none:
-see solid.sum_planes). The results go to out/benchy-<width>mm-<D>um,
-with -planes<T> added when planes are used.
+turned A degrees (default TURN). With --pixel and --cone, the plate's
+pixels are P um apart and the scene's light spreads C degrees either
+way (see solid.Optics.wide); without, the plate is as at first: 0.5 um
+pixels, 7 degrees; --slab sets the slabs' depth, T um (see
+solid.Optics). With --plate, the plate is W mm wide, whatever the boat's
+size. The results go to out/benchy-<width>mm-<D>um, with -<C>deg-<P>um
+added for wide plates, and -boat<S> for a plate of its own width.
 
 The boat (scenes/3dbenchy, public domain since 2025), scaled to about
 1.7 mm long, stands upright, turned 30 degrees to show its bow, its
@@ -18,6 +23,7 @@ itself, through the cabin's windows and doorways too. The views and the
 plate's light go to out/benchy-... (see the viewer, viewer.py).
 """
 
+import dataclasses
 import math
 import sys
 from pathlib import Path
@@ -75,15 +81,29 @@ def _option(name, default):
 
 
 def main():
+    global TURN
     scale = _option("--scale", 1.0)
     spacing = _option("--spacing", solid.SPACING)
+    TURN = math.radians(_option("--turn", math.degrees(TURN)))
+    if "--cone" in sys.argv:
+        pixel, degrees = _option("--pixel", 0.25), _option("--cone", 24.0)
+        solid.OPTICS = solid.Optics.wide(pixel, degrees)
+        if "--slab" in sys.argv:
+            solid.OPTICS = dataclasses.replace(solid.OPTICS, slab=_option("--slab", 0.0))
+        wide = f"-{degrees:g}deg-{pixel:g}um"
+    else:
+        wide = ""
+    o = solid.OPTICS
     triangles = boat(scale)
     points, normals = sample(triangles, spacing, np.random.default_rng(3))
     hull = (points, normals, np.full(len(points), ALBEDO), np.full(len(points), GLOSS))
     focus = {k: scale * v for k, v in FOCUS.items()}
-    size = round(solid.PLATE["size"] * scale)
-    name = f"benchy-{size * solid.PLATE['pitch'] / 1000:g}mm-{spacing:g}um"
-    slab = _option("--slab", solid.SLAB)
-    if slab:
-        name += f"-planes{slab:g}"
-    solid.render(name, {"boat": hull}, world(triangles), focus, plate_size=size, slab=slab)
+    # The plate, S times 2048 um across, in whole kept pixels.
+    width = _option("--plate", 2.048 * scale) * 1000
+    size = o.keep * math.ceil(width / o.pixel / o.keep)
+    name = f"benchy-{width / 1000:g}mm-{spacing:g}um{wide}"
+    if "--plate" in sys.argv:
+        name += f"-boat{scale:g}"
+    if TURN != math.radians(30):
+        name += f"-turn{math.degrees(TURN):g}"
+    solid.render(name, {"boat": hull}, world(triangles), focus, plate_size=size)
