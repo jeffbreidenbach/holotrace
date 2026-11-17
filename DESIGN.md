@@ -201,7 +201,7 @@ evaluations. Four ideas bring that down to a couple of hours.
 
 ### 5.1 Recording planes: sum points close, carry the rest by plane waves
 
-Points are taken in slabs `slab` µm deep (600 µm at ±35°). Each slab's
+Points are taken in slabs `slab` µm deep (300 µm at ±35°). Each slab's
 points are summed onto a **recording plane** `clear` µm (200 µm) beyond
 the slab's face nearer the plate, where each point's cone covers only a
 small disc. That plane's light is then **carried to the plate by its
@@ -382,6 +382,22 @@ go through `planes.sum_by_groups`:
    written at all. The files are sparse: what is not written reads as
    zeros and takes no room. Each group gets a new scratch file so this
    holds. The 4 cm spectrum takes 33 GB on disk, not 51.
+8. **The carry step in one pass** (`solid.moved`). Moving a patch's
+   plane waves on was eight or so array operations, and took longer than
+   the transform itself (0.19 s against 0.15 s for a 15360² patch). It
+   is now one GPU kernel. Its phase is the distance's own, kept to a
+   whole turn in double precision, plus what the wave's slant takes off,
+   so single precision holds it to a thousandth of a radian.
+9. **Several groups a pass.** The disk's sustained writing (0.5–1 GB/s
+   here) limits the carry. As many groups' planes are made as the disk
+   has room for, then one pass over the spectrum adds them all: the
+   4 cm spectrum is rewritten twice, not seven times.
+10. **Faded light and 300 µm slabs** (§4). The fade costs 28% more point
+    work at a given slab depth; thinner slabs win it back. Each slab
+    costs a transform a tile, about 16 s a group at 4 cm, so the best
+    depth there is 300–400 µm, not thinner.
+11. **Brightness maps kept on disk** (`solid.seen_maps`): a rerun of the
+    same scene skips Mitsuba (5 minutes, and its start-up hang).
 
 **Results.**
 
@@ -389,20 +405,26 @@ go through `planes.sum_by_groups`:
 |---|---|---|---|
 | In-memory carry (removed) | 92 min + 26 min spectrum | ~2 h | 26 GB + 3 GB swap |
 | Plane to plane, SATA SSD | 105 min | ~1 h 50 min | ~4 GB |
-| + steps 6 and 7, on NVMe | **35 min** (24 min making planes, 11 min carrying) | ~40 min | ~4 GB (RSS is higher: page cache) |
+| + steps 6 and 7, on NVMe | 35 min (24 min making planes, 11 min carrying) | ~40 min | ~4 GB (RSS is higher: page cache) |
+| + steps 8 to 11 (faded, 300 µm slabs) | **24 min** (16.5 min making planes, 7.5 min carrying) | ~29 min, 24 min on a rerun | ~4 GB |
 
 - **2 cm:** 878 s by GPU tiles; 1066 s plane to plane; 892 s with steps 6
   and 7 on SATA.
 - **Accuracy:** views agree with the old method to 0.04–0.09% throughout.
-- **Where the time goes now:** about two thirds in the GPU's point sum,
-  one third carrying planes. On SATA the disk dominated: most of the
-  "making" time there was writing the scratch plane.
+- **Where the time goes now:** no one thing. Of the 16.5 minutes making
+  planes, roughly a third each is the point sum, the transforms, and
+  writing the scratch planes (49 GB each); the rest is the carry, which
+  the disk limits. A run writes about 400 GB.
+- **Tried and left out:** recording planes closer than 200 µm (error up
+  from 2.1% to 2.6% at 100 µm); slabs thinner than 300 µm (slower at
+  4 cm).
 - **Results on another disk:** `HOLOTRACE_OUT=/path` puts results (and
   the scratch plane) there; the viewer reads the same variable.
 - **Scaling:** cost now grows with plate area × number of groups, not
   depth squared. Depth is no longer limited by memory.
 
-**Disk needed:** the spectrum plus one scratch plane, 2 × (n² × 8 bytes).
+**Disk needed:** the spectrum plus one scratch plane, 2 × (n² × 8 bytes), at
+the least; with more, more groups go in each pass.
 
 | Viewing cone | Kept pitch | Plate for 91 GB free | For ~160 GB | For ~670 GB |
 |---|---|---|---|---|
@@ -411,7 +433,7 @@ go through `planes.sum_by_groups`:
 | ±15° | 1.0 µm | 7.3 cm | 9.9 cm | 20 cm |
 
 The disk matters: moving from the SATA SSD to NVMe cut the 4 cm run by
-well over half. 10 cm at ±35° is estimated at 10–12 h on that GPU with
+well over half. 10 cm at ±35° is estimated at 7–9 h on that GPU with
 enough NVMe, or 1–2 h on a rented 4090-class card (not run).
 
 ## 7. The viewer (`viewer.py`)
@@ -596,9 +618,9 @@ separately). A non-default turn is added as `-turn15`.
 ## 11. Reproducing the main results
 
 ```
-uv run --extra gpu holotrace benchy --plate 20.48 --scale 6 --spacing 12 --turn 15 --pixel 0.25 --cone 35 --slab 600
+uv run --extra gpu holotrace benchy --plate 20.48 --scale 6 --spacing 12 --turn 15 --pixel 0.25 --cone 35 --slab 300
 #   2 cm plate, 1 cm boat: ~17 min, 13 GB spectrum (8 GB on disk)
-uv run --extra gpu holotrace benchy --plate 40.96 --scale 16 --spacing 32 --pixel 0.25 --cone 35 --slab 600
+uv run --extra gpu holotrace benchy --plate 40.96 --scale 16 --spacing 32 --pixel 0.25 --cone 35 --slab 300
 #   4 cm plate, 27 mm boat: ~40 min on NVMe (set HOLOTRACE_OUT to a folder on it);
 #   the spectrum 33 GB on disk, and up to 54 GB of scratch while running
 uv run --extra gpu holotrace view benchy-40.96mm-32um-35deg-0.25um-boat16 --eye 300 --focus 0
@@ -626,12 +648,8 @@ In the order recommended:
 3. **Go bigger** (§6.4). It needs only disk: 10 cm at ±35° needs about
    670 GB and roughly 2–3 days on a SATA SSD, much less on NVMe and a
    newer GPU.
-4. **Thinner slabs on a big plate** (§4): with the fade, 300 µm slabs
-   are as accurate as 600 µm and were 1.8× faster on a 4 mm plate. Time
-   them at 4 cm.
-5. **Smaller items:**
+4. **Smaller items:**
    - retry Mitsuba's start automatically when it hangs;
-   - add two groups per pass over the spectrum (a few minutes a run);
    - richer materials;
    - a glass scene, to test the original magnifying-glass idea at scale;
    - automated tests for the checks in §4;

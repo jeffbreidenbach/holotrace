@@ -376,23 +376,53 @@ def _carry(patch, distance, margin, pitch):
 
 def _step(spectrum, distance, pitch):
     """Moves a patch's plane waves (its transform, on the GPU, changed in
-    place) on by `distance`, as _carry has it: a block of rows at a
-    time."""
+    place) on by `distance`, as _carry has it."""
     import cupy as cp
 
     lam = WAVELENGTH
     ph, pw = spectrum.shape
     fx = cp.fft.fftfreq(pw, pitch).astype(cp.float32)[None, :]
-    fy = cp.fft.fftfreq(ph, pitch).astype(cp.float32)
+    fy = cp.fft.fftfreq(ph, pitch).astype(cp.float32)[:, None]
     limit_x = 1 / (lam * math.sqrt((2 * distance / (pw * pitch)) ** 2 + 1))
     limit_y = 1 / (lam * math.sqrt((2 * distance / (ph * pitch)) ** 2 + 1))
-    for r in range(0, ph, 1024):
-        y = fy[r : r + 1024, None]
-        s2 = (fx * fx + y * y) * lam * lam
-        cone = OPTICS.cone
-        keep = (s2 < cone**2 / (1 + cone**2)) & (cp.abs(fx) < limit_x) & (cp.abs(y) < limit_y)
-        phase = (2 * math.pi / lam) * distance * cp.sqrt(cp.maximum(0, 1 - s2))
-        spectrum[r : r + 1024] *= keep * cp.exp(1j * phase).astype(cp.complex64)
+    moved(spectrum, fx, fy, distance, limit_x, limit_y, spectrum)
+
+
+def moved(waves, fx, fy, distance, limit_x, limit_y, out=None):
+    """Plane waves (on the GPU, each with its frequencies `fx` and `fy`)
+    moved on by `distance`: those within the cone and the limits each
+    turned by its own phase, the rest zero. In one pass on the GPU. The
+    phase is worked out as the distance's own (kept to a whole turn on
+    the way in) plus what the wave's slant takes off it, which single
+    precision holds to a thousandth of a radian over centimetres."""
+    import cupy as cp
+
+    global _MOVED
+    if _MOVED is None:
+        _MOVED = cp.ElementwiseKernel(
+            "complex64 v, float32 fx, float32 fy, float32 lam2, float32 sine2, float32 limx, float32 limy, "
+            "float32 kd, float32 c0, float32 s0",
+            "complex64 out",
+            """
+            float s2 = (fx * fx + fy * fy) * lam2;
+            if (s2 >= sine2 || fabsf(fx) >= limx || fabsf(fy) >= limy) {
+                out = complex<float>(0, 0);
+            } else {
+                float s, c;
+                sincosf(-kd * s2 / (1.0f + sqrtf(1.0f - s2)), &s, &c);
+                out = v * complex<float>(c0 * c - s0 * s, s0 * c + c0 * s);
+            }
+            """,
+            "holotrace_moved",
+        )
+    f32 = np.float32
+    kd = 2 * math.pi / WAVELENGTH * distance
+    args = (waves, fx, fy, f32(WAVELENGTH**2), f32(OPTICS.sine**2), f32(limit_x), f32(limit_y),
+            f32(kd), f32(math.cos(kd)), f32(math.sin(kd)))
+    return _MOVED(*args) if out is None else _MOVED(*args, out)
+
+
+_MOVED = None
 
 
 def _fast_len(n):
@@ -419,6 +449,32 @@ def results():
     """Where results go: out/, or the folder HOLOTRACE_OUT names (a fast
     disk with room, say: big plates are made on disk, see planes.py)."""
     return Path(os.environ.get("HOLOTRACE_OUT", "out"))
+
+
+def seen_maps(path, world, points, normals, albedo, gloss, shadows=True):
+    """Which of the points are seen at all, and those points' brightness
+    maps (see maps), in half precision (plenty for brightness, and it
+    leaves memory for carrying the plate's light). They are kept in the
+    file at `path` and read back from it when the points, their surfaces
+    and the cone are the same, as Mitsuba's answer would be: it takes
+    minutes. (The scene Mitsuba sees is taken to go with the points.)"""
+    import hashlib
+
+    o = OPTICS
+    h = hashlib.sha1(repr((o.cone, o.directions, shadows, LIGHT.tolist(), LIGHT_SIZE, SHADOW_RAYS)).encode())
+    for a in (points, normals, albedo, gloss):
+        h.update(np.ascontiguousarray(a, np.float64).tobytes())
+    key = h.hexdigest()
+    if path.exists():
+        with np.load(path) as kept:
+            if str(kept["key"]) == key:
+                print(f"brightness maps read back from {path}", flush=True)
+                return kept["alive"], kept["light"]
+    light = maps(world, points, normals, albedo, gloss, shadows=shadows)
+    alive = light.max(axis=(1, 2)) > 0
+    light = light[alive].astype(np.float16)
+    np.savez(path, key=key, alive=alive, light=light)
+    return alive, light
 
 
 def render(name, parts, world, focus, plate_size=PLATE["size"], shadows=True):
@@ -451,8 +507,7 @@ def render(name, parts, world, focus, plate_size=PLATE["size"], shadows=True):
     points, normals, albedo, gloss = (np.concatenate(a) for a in zip(*parts.values()))
     counts = ", ".join(f"{len(p[0])} on the {k}" for k, p in parts.items())
     print(f"{len(points)} points: {counts}", flush=True)
-    light = maps(world, points, normals, albedo, gloss, shadows=shadows)
-    alive = light.max(axis=(1, 2)) > 0
+    alive, light = seen_maps(out / "maps.npz", world, points, normals, albedo, gloss, shadows)
     print(
         f"what each sees and lights, {OPTICS.directions}x{OPTICS.directions} directions each, by Mitsuba: "
         f"{time.time() - start:.1f} s; {alive.sum()} points seen at all",
@@ -465,10 +520,6 @@ def render(name, parts, world, focus, plate_size=PLATE["size"], shadows=True):
     o = OPTICS
     n = plate_size // o.keep
     big = n * n * 8 > 6 * 2**30
-    # Only the points seen at all, their maps no longer kept twice, and
-    # in half precision (plenty for brightness), to leave memory for
-    # carrying the plate's light.
-    light = light[alive].astype(np.float16)
     if big:
         plate = planes.sum_by_groups(points[alive], light, phases[alive], plate_size, out / "spectrum.npy")
     else:

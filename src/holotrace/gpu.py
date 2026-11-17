@@ -241,8 +241,10 @@ __device__ bool seen_at(
     float bright = m[0] * (1 - au) * (1 - av) + m[1] * au * (1 - av)
                  + m[n] * (1 - au) * av + m[n + 1] * au * av;
     if (bright <= 0) return false;
-    float extra = depth * t2 / (sqrtf(1.0f + t2) + 1.0f);
-    float strength = fade * bright * powf(1.0f + t2, -0.75f) / fabsf(depth);
+    // (1 + t2)^(-3/4), by square roots: far cheaper than powf.
+    float root = sqrtf(1.0f + t2);
+    float extra = depth * t2 / (root + 1.0f);
+    float strength = fade * bright / (root * sqrtf(root) * fabsf(depth));
     float s, c;
     sincosf(k * extra + phase, &s, &c);
     *value = complex<float>(strength * c, strength * s);

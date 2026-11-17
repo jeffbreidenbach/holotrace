@@ -32,6 +32,7 @@ the end and transformed afresh.
 
 import math
 import os
+import shutil
 import time
 
 import numpy as np
@@ -42,6 +43,9 @@ from .magnifier import WAVELENGTH
 BLOCK = 512
 # The biggest band of rows of a plane held in main memory, in bytes.
 BAND = 6 * 2**30
+# How many groups' planes to make before each pass over the spectrum: as
+# many as the disk has room for, if None.
+PER = None
 
 
 def sum_by_groups(points, light, phases, size, path):
@@ -76,18 +80,31 @@ def sum_by_groups(points, light, phases, size, path):
     sums = out if width == n else _scratch(path, "sum", (width // block, width, block))
     print(f"  kept every {pitch:g} um: {n}^2 pixels, {sum(len(s) for _, s in groups)} slabs in {len(groups)} "
           f"groups, carried plane to plane{f', on planes {width}^2' if width > n else ''}", flush=True)
+    # As many groups' planes at a time as the disk has room for, beside
+    # the spectrum (twice, if it is to be cut): each pass over the
+    # spectrum then adds them all, and it is read and written less often.
+    whole = 8 * width * width
+    low, high = _cone(width, block)[:2]
+    room = 0.9 * shutil.disk_usage(path.parent).free - (2 if width > n else 1) * whole * 0.65
+    per = PER or max(1, int(room / (whole * (low + width // block - high) / (width // block))))
     start = time.time()
-    for g, (middle, slabs) in enumerate(groups):
+    for first in range(0, len(groups), per):
+        made = []
+        for g in range(first, min(first + per, len(groups))):
+            middle, slabs = groups[g]
+            t = time.time()
+            # A new file each time, so that what is not written is zero.
+            plane = _scratch(path, f"plane{g - first}", (width // block, width, block))
+            _plane(points, slabs, middle, light, phases, width, plane)
+            made.append((plane, middle))
+            print(f"  group {g + 1} of {len(groups)}, {len(slabs)} slabs, its plane {middle / 1000:+.2f} mm: made in "
+                  f"{time.time() - t:.0f} s; {time.time() - start:.0f} s", flush=True)
         t = time.time()
-        # A new file each time, so that what is not written is zero.
-        plane = _scratch(path, "plane", (width // block, width, block))
-        _plane(points, slabs, middle, light, phases, width, plane)
-        made = time.time() - t
-        _add_carried(plane, middle, sums, first=g == 0)
-        _remove(plane)
-        del plane
-        print(f"  group {g + 1} of {len(groups)}, {len(slabs)} slabs, its plane {middle / 1000:+.2f} mm: made in "
-              f"{made:.0f} s, carried in {time.time() - t - made:.0f} s; {time.time() - start:.0f} s", flush=True)
+        _add_carried(made, sums, first=first == 0)
+        for plane, _ in made:
+            _remove(plane)
+        del made, plane
+        print(f"  carried to the plate in {time.time() - t:.0f} s; {time.time() - start:.0f} s", flush=True)
     if width > n:
         _cut(sums, out, edge)
         _remove(sums)
@@ -246,41 +263,43 @@ def _cone(width, block):
     return low, high, rows
 
 
-def _add_carried(plane, middle, sums, first):
-    """Transforms `plane` (already along its rows) along its columns, a
-    block at a time, carries it `middle` to the plate (its plane waves
-    within the cone and the band limit, each moved on by its own phase, as
-    in solid._carry), and adds it to `sums` (or, if `first`, puts it
+def _add_carried(planes, sums, first):
+    """Transforms each of `planes` (each a plane, already transformed
+    along its rows, and its distance behind the plate) along its columns,
+    a block at a time, carries it to the plate (its plane waves within
+    the cone and the band limit, each moved on by its own phase, as in
+    solid._carry), and adds them all to `sums` (or, if `first`, puts them
     there: `sums` is then new, all zeros). Only the blocks and rows
-    within the cone are read or written (see _cone): the rest of both
+    within the cone are read or written (see _cone): the rest of the
     files stays unwritten, which reads as zeros and takes no room."""
     import cupy as cp
     import cupyx.scipy.fft as cufft
 
     o, lam = solid.OPTICS, WAVELENGTH
-    blocks, width, block = plane.shape
+    blocks, width, block = sums.shape
     pitch = o.kept_pitch
     fy = cp.fft.fftfreq(width, pitch).astype(cp.float32)[:, None]
     fx = np.fft.fftfreq(width, pitch).astype(np.float32)
-    limit = 1 / (lam * math.sqrt((2 * middle / (width * pitch)) ** 2 + 1))
     rows = _cone(width, block)[2]
     for j in range(blocks):
         if rows[j] == 0:
             continue
-        cols = cufft.fft(cp.asarray(plane[j]), axis=0, overwrite_x=True)
         x = cp.asarray(fx[j * block : (j + 1) * block])[None, :]
         r = int(rows[j])
-        for part in [slice(None)] if 2 * r >= width else [slice(0, r), slice(width - r, width)]:
-            y = fy[part]
-            s2 = (x * x + y * y) * lam * lam
-            keep = (s2 < o.sine**2) & (cp.abs(x) < limit) & (cp.abs(y) < limit)
-            moved = cols[part] * (keep * cp.exp((2j * math.pi / lam * middle) * cp.sqrt(cp.maximum(0, 1 - s2)))).astype(cp.complex64)
-            del s2, keep
+        parts = [slice(None)] if 2 * r >= width else [slice(0, r), slice(width - r, width)]
+        total = [None] * len(parts)
+        for plane, middle in planes:
+            limit = 1 / (lam * math.sqrt((2 * middle / (width * pitch)) ** 2 + 1))
+            cols = cufft.fft(cp.asarray(plane[j]), axis=0, overwrite_x=True)
+            for i, part in enumerate(parts):
+                there = solid.moved(cols[part], x, fy[part], middle, limit, limit)
+                total[i] = there if total[i] is None else total[i] + there
+            del cols, there
+        for i, part in enumerate(parts):
             if not first:
-                moved += cp.asarray(sums[j, part])
-            sums[j, part] = cp.asnumpy(moved)
-            del moved
-        del cols
+                total[i] += cp.asarray(sums[j, part])
+            sums[j, part] = cp.asnumpy(total[i])
+        del total
     cp.get_default_memory_pool().free_all_blocks()
     cp.fft.config.get_plan_cache().clear()
 
