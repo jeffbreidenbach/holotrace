@@ -142,7 +142,7 @@ def _plane(points, slabs, middle, light, phases, width, plane):
         seen_from = points[mine] + [0.0, 0.0, at]
         margin = int(math.ceil(o.cone * abs(at - middle) / pitch)) + 8
         px, py, pz = seen_from.T
-        r = o.cone * np.abs(pz)
+        r = o.cone * o.fade * np.abs(pz)
         bounds = (np.floor((px - r) / pitch + width / 2), np.ceil((px + r) / pitch + width / 2) + 1,
                   np.floor((py - r) / pitch + width / 2), np.ceil((py + r) / pitch + width / 2) + 1)
         parts.append((at, mine, seen_from, margin, bounds))
@@ -201,7 +201,8 @@ def _tile(parts, middle, light, phases, width, box, deepest):
             continue
         which = mine[near]
         seen = SeenPoints(size=width, pitch=pitch, wavelength=WAVELENGTH, points=seen_from[near],
-                          maps=cp.asarray(light[which], cp.float32), cone=o.cone, tile=(ox, oy, sw, sh))
+                          maps=cp.asarray(light[which], cp.float32), cone=o.cone, tile=(ox, oy, sw, sh),
+                          edge=o.cone * o.fade)
         patch = cp.zeros((h, w), cp.complex64)
         seen.light(phases[which], into=(patch, x0 - deepest, y0 - deepest))
         del seen

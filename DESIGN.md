@@ -164,14 +164,33 @@ the plate's light (amplitude, by region of the cone) against planes
 
 - **The differences shrink only slowly with distance,** so the reference
   is not converged either.
-- **Likely cause (untested):** each point's light is cut off sharply at
-  the cone's edge on its recording plane, and a sharp edge ripples. That
-  ripple weakens as the square root of the distance and is strongest
-  near the cone's edge, which matches the table.
-- **Likely cure (untested):** fade each point's light out a little past
-  the cone and let the carry's cone mask do the cutting.
-- **Thinner slabs** are 1.8–2× faster on the GPU, but a little less
-  accurate, so the slab depth was left at 600 µm.
+- **Cause (confirmed):** each point's light was cut off sharply at the
+  cone's edge on its recording plane, and a sharp edge ripples.
+- **Cure (in use for wide plates):** each point's light now fades out
+  between the cone and 1.13 times it (`Optics.fade`; as far as the kept
+  pixels can carry), and the carry's cone mask does the cutting.
+
+**Against a brute-force truth.** 3000 of the points, more than 100 µm
+from the plate, summed straight onto the plate at 0.25 µm with a fade
+far past the cone:
+
+| Slab / clearance (µm) | Fade | Inner half of the cone | 50–80% | 80–95% | 95–100% |
+|---|---|---|---|---|---|
+| 600 / 200 | none | 3.6% | 4.2% | 8.7% | 30% |
+| 200 / 1200 | none | 3.2% | 3.5% | 5.9% | 24% |
+| 600 / 200 | 1.13 | 2.0% | 2.2% | 2.4% | 4.2% |
+| 300 / 200 | 1.14 | 2.1% | 2.3% | 2.5% | 4.6% |
+
+- **Both sums agree with it equally:** tile by tile and plane to plane
+  give the same figures to 0.03%.
+- **What is left** is mostly from points near the plate: with only
+  points more than 400 µm away it is 1.3–1.6% (0.9% with planes 800 µm
+  from their points). The truth is itself less sure for near points.
+- **Cost:** the faded light covers 28% more of each plane, so the GPU
+  sum takes that much longer at the same slab depth.
+- **Thinner slabs no longer cost accuracy.** On the 4 mm plate, all the
+  points: 600 µm slabs without the fade 32–36 s; with it 41–44 s; 300 µm
+  slabs with it 23–25 s. Not yet timed on a big plate.
 
 ## 5. The core ideas that make it tractable
 
@@ -545,8 +564,8 @@ split is not measured.
   one glossy highlight, one disc light.
 - **32 × 32 directions per point** (about 2.2° apart at ±35°): highlights
   and occlusion edges are blended between those directions.
-- **Recording-plane error:** 1.2–1.6% in view brightness, and 4–5% in
-  the field's amplitude within most of the cone, more at its edge (§4).
+- **Recording-plane error:** about 2% in the field's amplitude within
+  the cone, 4% at its very edge (§4).
 - **Viewer approximations:** the real eye's view is cut into cells (§7),
   and the LED and lamp use a handful of discrete wavelengths and
   directions.
@@ -607,10 +626,9 @@ In the order recommended:
 3. **Go bigger** (§6.4). It needs only disk: 10 cm at ±35° needs about
    670 GB and roughly 2–3 days on a SATA SSD, much less on NVMe and a
    newer GPU.
-4. **Fade each point's light past the cone** (§4), to test whether the
-   field's 4–5% error is the sharp cut-off's ripple. If it is, planes
-   could sit closer to their points and slabs be thinner, which is also
-   about 2× faster on the GPU.
+4. **Thinner slabs on a big plate** (§4): with the fade, 300 µm slabs
+   are as accurate as 600 µm and were 1.8× faster on a 4 mm plate. Time
+   them at 4 cm.
 5. **Smaller items:**
    - retry Mitsuba's start automatically when it hangs;
    - add two groups per pass over the spectrum (a few minutes a run);

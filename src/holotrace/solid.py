@@ -199,6 +199,9 @@ class Optics:
       wider the cone, the closer that is.
     - directions: each point's brightness is worked out for directions x
       directions directions across the cone (see maps).
+    - fade: each point's light fades out between the cone and `fade`
+      times it (as tangents), rather than stopping at the cone: 1 for a
+      sharp stop.
 
     The default is the plate so far: 0.5 um pixels, the scene's light
     within 7 degrees, the reference at 23.6 degrees, kept every 2 um."""
@@ -210,6 +213,7 @@ class Optics:
     slab: float = 1000.0
     clear: float = 400.0
     directions: int = 24
+    fade: float = 1.0
 
     @property
     def sine(self):
@@ -239,8 +243,14 @@ class Optics:
         # At 24 degrees, planes 200 um from their points differ from
         # summing straight onto the plate by about 1.5%, 400 um by about
         # 0.6% (and at 7 degrees, 400 um by a few percent).
+        # Each point's light fades out past the cone, as far as the kept
+        # pixels can carry: cut off sharply at the cone it ripples, which
+        # put the plate's light out by 4% (9% near the cone's edge)
+        # against 2% faded, for a fifth more time.
+        finest = WAVELENGTH / (2 * pixel * keep)
+        fade = min(1.14, 0.97 * finest / math.sqrt(1 - finest**2) / cone) if finest < 1 else 1.14
         return cls(pixel, cone, reference, keep, slab=max(200.0, base.slab * ratio),
-                   clear=max(200.0, base.clear * ratio), directions=32)
+                   clear=max(200.0, base.clear * ratio), directions=32, fade=max(1.0, fade))
 
 
 # The optics in use (see Optics; benchy.py sets them).
@@ -292,7 +302,7 @@ def sum_planes(points, light, phases, size, kept=None):
         seen_from = points[mine] + [0.0, 0.0, plane]
         margin = int(math.ceil(o.cone * abs(plane) / pitch)) + 8
         px, py, pz = seen_from.T
-        r = o.cone * np.abs(pz)
+        r = o.cone * o.fade * np.abs(pz)
         bounds = (
             np.floor((px - r) / pitch + n / 2), np.ceil((px + r) / pitch + n / 2) + 1,
             np.floor((py - r) / pitch + n / 2), np.ceil((py + r) / pitch + n / 2) + 1,
@@ -318,7 +328,7 @@ def sum_planes(points, light, phases, size, kept=None):
                     continue
                 which = mine[near]
                 seen = SeenPoints(**grid, points=seen_from[near], maps=cp.asarray(light[which], cp.float32),
-                                  cone=o.cone, tile=(ox, oy, w, h))
+                                  cone=o.cone, tile=(ox, oy, w, h), edge=o.cone * o.fade)
                 out += _carry(seen.light(phases[which]), plane, m, pitch)
                 del seen
                 # Each slab's patch is a different size; the GPU memory

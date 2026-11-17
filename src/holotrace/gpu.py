@@ -218,14 +218,23 @@ __device__ int owner(const int* start, int count, int b) {
 // where it sends none.
 __device__ bool seen_at(
     int col, int row, int size, float pitch, float k,
-    float px, float py, float depth, float phase, float cone,
+    float px, float py, float depth, float phase, float cone, float edge,
     const float* map, int n, complex<float>* value)
 {
     float tx = (coordinate(col, size, pitch) - px) / depth;
     float ty = (coordinate(row, size, pitch) - py) / depth;
     float t2 = tx * tx + ty * ty;
-    if (t2 >= cone * cone) return false;
+    if (t2 >= edge * edge) return false;
+    // Past the cone the light fades out smoothly up to `edge`, as bright
+    // as the map's nearest direction: a sharp rim would ripple.
+    float fade = 1.0f;
+    if (t2 > cone * cone) {
+        float c = cosf(1.5707963f * (sqrtf(t2) - cone) / (edge - cone));
+        fade = c * c;
+    }
     float u = (tx + cone) / (2 * cone) * (n - 1), v = (ty + cone) / (2 * cone) * (n - 1);
+    u = fminf(fmaxf(u, 0.0f), (float)(n - 1));
+    v = fminf(fmaxf(v, 0.0f), (float)(n - 1));
     int iu = min((int)u, n - 2), iv = min((int)v, n - 2);
     float au = u - iu, av = v - iv;
     const float* m = map + iv * n + iu;
@@ -233,7 +242,7 @@ __device__ bool seen_at(
                  + m[n] * (1 - au) * av + m[n + 1] * au * av;
     if (bright <= 0) return false;
     float extra = depth * t2 / (sqrtf(1.0f + t2) + 1.0f);
-    float strength = bright * powf(1.0f + t2, -0.75f) / fabsf(depth);
+    float strength = fade * bright * powf(1.0f + t2, -0.75f) / fabsf(depth);
     float s, c;
     sincosf(k * extra + phase, &s, &c);
     *value = complex<float>(strength * c, strength * s);
@@ -260,7 +269,7 @@ __device__ bool tile_pixel(
 // part of the plate from pixel (ox, oy), `width` pixels across; the
 // points' windows lie within it.
 extern "C" __global__ void seen_many(
-    float* light, int size, int ox, int oy, int width, float pitch, float k, float cone,
+    float* light, int size, int ox, int oy, int width, float pitch, float k, float cone, float edge,
     int count, const int* start, const int* x0, const int* y0, const int* nx, const int* ny,
     const float* px, const float* py, const float* depth, const float* phase,
     const float* maps, int n)
@@ -269,7 +278,7 @@ extern "C" __global__ void seen_many(
     if (!tile_pixel(start, count, nx, ny, &j, &i, &jj)) return;
     int col = x0[j] + i, row = y0[j] + jj;
     complex<float> v;
-    if (!seen_at(col, row, size, pitch, k, px[j], py[j], depth[j], phase[j], cone,
+    if (!seen_at(col, row, size, pitch, k, px[j], py[j], depth[j], phase[j], cone, edge,
                  maps + (size_t)j * n * n, n, &v)) return;
     int at = 2 * ((row - oy) * width + (col - ox));
     atomicAdd(light + at, v.real());
@@ -278,7 +287,7 @@ extern "C" __global__ void seen_many(
 
 // `seen_reverse` for every point, into out (2 per point).
 extern "C" __global__ void seen_reverse_many(
-    const complex<float>* grad, int size, int ox, int oy, int width, float pitch, float k, float cone,
+    const complex<float>* grad, int size, int ox, int oy, int width, float pitch, float k, float cone, float edge,
     int count, const int* start, const int* x0, const int* y0, const int* nx, const int* ny,
     const float* px, const float* py, const float* depth, const float* phase,
     const float* maps, int n, float* out)
@@ -290,7 +299,7 @@ extern "C" __global__ void seen_reverse_many(
     if (tile_pixel(start, count, nx, ny, &j, &i, &jj)) {
         int col = x0[j] + i, row = y0[j] + jj;
         complex<float> v;
-        if (seen_at(col, row, size, pitch, k, px[j], py[j], depth[j], phase[j], cone,
+        if (seen_at(col, row, size, pitch, k, px[j], py[j], depth[j], phase[j], cone, edge,
                     maps + (size_t)j * n * n, n, &v)) {
             complex<float> g = grad[(row - oy) * width + (col - ox)];
             r = v.real() * g.real() + v.imag() * g.imag();
@@ -463,8 +472,10 @@ class SeenPoints:
     their phases are given each time. With `tile` (x, y, width, height,
     in pixels), only that part of the plate is worked out."""
 
-    def __init__(self, size, pitch, wavelength, points, maps, cone, tile=None):
+    def __init__(self, size, pitch, wavelength, points, maps, cone, tile=None, edge=None):
         self.size, self.pitch, self.cone = size, pitch, cone
+        # Where each point's light has faded out (a tangent): at the cone, if not given.
+        self.edge = edge or cone
         self.tile = tile or (0, 0, size, size)
         ox, oy, tw, th = self.tile
         self.k = 2 * math.pi / wavelength
@@ -472,7 +483,7 @@ class SeenPoints:
         px, py, pz = (np.asarray(a, float) for a in np.asarray(points).T)
         self.depth = -pz
         # Each point's window, as Plate.window has it.
-        r = cone * np.abs(self.depth)
+        r = self.edge * np.abs(self.depth)
         lo_x = np.clip(np.floor((px - r) / pitch + size / 2), ox, ox + tw).astype(np.int64)
         hi_x = np.clip(np.ceil((px + r) / pitch + size / 2) + 1, ox, ox + tw).astype(np.int64)
         lo_y = np.clip(np.floor((py - r) / pitch + size / 2), oy, oy + th).astype(np.int64)
@@ -509,7 +520,7 @@ class SeenPoints:
             return light
         _kernel("seen_many")(
             (self.blocks,), _BLOCK,
-            (light, i32(self.size), i32(ox), i32(oy), i32(tw), f32(self.pitch), f32(self.k), f32(self.cone),
+            (light, i32(self.size), i32(ox), i32(oy), i32(tw), f32(self.pitch), f32(self.k), f32(self.cone), f32(self.edge),
              *self._args, self._phase(phases), self.maps, np.int32(self.maps.shape[1])),
         )
         return light
@@ -523,7 +534,7 @@ class SeenPoints:
         f32, i32 = np.float32, np.int32
         _kernel("seen_reverse_many")(
             (self.blocks,), _BLOCK,
-            (grad, i32(self.size), i32(ox), i32(oy), i32(tw), f32(self.pitch), f32(self.k), f32(self.cone),
+            (grad, i32(self.size), i32(ox), i32(oy), i32(tw), f32(self.pitch), f32(self.k), f32(self.cone), f32(self.edge),
              *self._args, self._phase(np.zeros(count)), self.maps, np.int32(self.maps.shape[1]), out),
         )
         out = cp.asnumpy(out)
