@@ -27,6 +27,7 @@ This step needs an NVIDIA GPU (the `gpu` extra).
 """
 
 import math
+import os
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -353,13 +354,28 @@ def _carry(patch, distance, margin, pitch):
         padded = cp.zeros((ph, pw), cp.complex64)
         padded[:h, :w] = patch
         patch = padded
+    spectrum = cufft.fft2(patch, overwrite_x=True)
+    del patch
+    _step(spectrum, distance, pitch)
+    moved = cufft.ifft2(spectrum, overwrite_x=True)
+    out = moved[margin : h - margin, margin : w - margin].copy()
+    del moved, spectrum
+    cp.fft.config.get_plan_cache().clear()
+    return out
+
+
+def _step(spectrum, distance, pitch):
+    """Moves a patch's plane waves (its transform, on the GPU, changed in
+    place) on by `distance`, as _carry has it: a block of rows at a
+    time."""
+    import cupy as cp
+
     lam = WAVELENGTH
+    ph, pw = spectrum.shape
     fx = cp.fft.fftfreq(pw, pitch).astype(cp.float32)[None, :]
     fy = cp.fft.fftfreq(ph, pitch).astype(cp.float32)
     limit_x = 1 / (lam * math.sqrt((2 * distance / (pw * pitch)) ** 2 + 1))
     limit_y = 1 / (lam * math.sqrt((2 * distance / (ph * pitch)) ** 2 + 1))
-    spectrum = cufft.fft2(patch, overwrite_x=True)
-    del patch
     for r in range(0, ph, 1024):
         y = fy[r : r + 1024, None]
         s2 = (fx * fx + y * y) * lam * lam
@@ -367,11 +383,6 @@ def _carry(patch, distance, margin, pitch):
         keep = (s2 < cone**2 / (1 + cone**2)) & (cp.abs(fx) < limit_x) & (cp.abs(y) < limit_y)
         phase = (2 * math.pi / lam) * distance * cp.sqrt(cp.maximum(0, 1 - s2))
         spectrum[r : r + 1024] *= keep * cp.exp(1j * phase).astype(cp.complex64)
-    moved = cufft.ifft2(spectrum, overwrite_x=True)
-    out = moved[margin : h - margin, margin : w - margin].copy()
-    del moved, spectrum
-    cp.fft.config.get_plan_cache().clear()
-    return out
 
 
 def _fast_len(n):
@@ -392,6 +403,12 @@ def spectrum_in_place(a, block=512):
     for j in range(0, n, block):
         a[:, j : j + block] = scipy.fft.fft(a[:, j : j + block], axis=0, workers=-1)
     return a
+
+
+def results():
+    """Where results go: out/, or the folder HOLOTRACE_OUT names (a fast
+    disk with room, say: big plates are made on disk, see planes.py)."""
+    return Path(os.environ.get("HOLOTRACE_OUT", "out"))
 
 
 def render(name, parts, world, focus, plate_size=PLATE["size"], shadows=True):
@@ -418,7 +435,7 @@ def render(name, parts, world, focus, plate_size=PLATE["size"], shadows=True):
     the viewer), and a sheet of views (views.png)."""
     from .viewer import Look
 
-    out = Path("out") / name
+    out = results() / name
     out.mkdir(parents=True, exist_ok=True)
     start = time.time()
     points, normals, albedo, gloss = (np.concatenate(a) for a in zip(*parts.values()))

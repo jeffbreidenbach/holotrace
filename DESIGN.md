@@ -26,7 +26,8 @@ can reach, with its true path length, and the plate records their sum.
 
 The latest result is a 4.1 cm plate (163,840² pixels 0.25 µm apart)
 holding a 27 mm boat whose light spreads ±35°, viewed by a simulated eye
-30 cm away. It takes about 1 h 45 min on one 8 GB GPU from 2016.
+30 cm away. It takes about 40 min on one 8 GB GPU from 2016 with an NVMe
+disk.
 
 ## 2. Conventions
 
@@ -142,10 +143,35 @@ replaced, on a case small enough for both. In order:
 | Plane-to-plane sum (§6) | tile-by-tile sum, 2 cm spectrum | 0.76% overall; views 0.04–0.06% |
 | Plane-to-plane sum, 4 cm | the in-memory carry's views | 0.07–0.09% |
 | Wide-plane carry with a cut-out plate (`planes._cut`) | direct NumPy FFTs, synthetic field | 0.09% (float32 at the cone's edge) |
+| Slabs summed before transforming back; zeros never written | the earlier plane-to-plane result, 2 cm and 4 cm | views 0.04–0.09%, unchanged |
+| Real-eye view (`Look.eye_view`) | brute force (whole plane × sphere's phase, one filter), 4 mm plate | one cell: 0.4–1.2%, correlation 0.9999; 2–3 cells: 2–7%, correlation 0.997–0.999 |
 
-The recording planes themselves differ from a direct sum by 1.2–1.6% at
-±35° with planes 200 µm from their points. That is the method's own
-error floor, and the later changes were held to stay below it.
+The recording planes themselves differ from a direct sum by 1.2–1.6% in
+the brightness of views at ±35° with planes 200 µm from their points,
+and the later changes were held to stay below that.
+
+**The field itself is less exact than that figure suggests.** Comparing
+the plate's light (amplitude, by region of the cone) against planes
+1200 µm from their points, on a 4 mm plate:
+
+| Slab / clearance (µm) | Sum time | Inner half of the cone | 50–80% | 80–95% |
+|---|---|---|---|---|
+| 200 / 800 | 100 s | 2.9% | 3.3% | 8.4% |
+| 600 / 400 | 60 s | 3.3% | 3.9% | 8.8% |
+| 600 / 200 (in use) | 32 s | 4.1% | 4.8% | 10.4% |
+| 300 / 200 | 18 s | 4.6% | 5.3% | 11.6% |
+| 200 / 200 | 15 s | 4.9% | 5.7% | 12.4% |
+
+- **The differences shrink only slowly with distance,** so the reference
+  is not converged either.
+- **Likely cause (untested):** each point's light is cut off sharply at
+  the cone's edge on its recording plane, and a sharp edge ripples. That
+  ripple weakens as the square root of the distance and is strongest
+  near the cone's edge, which matches the table.
+- **Likely cure (untested):** fade each point's light out a little past
+  the cone and let the carry's cone mask do the cutting.
+- **Thinner slabs** are 1.8–2× faster on the GPU, but a little less
+  accurate, so the slab depth was left at 600 µm.
 
 ## 5. The core ideas that make it tractable
 
@@ -322,19 +348,38 @@ go through `planes.sum_by_groups`:
    summed on that wider domain, transformed back, the plate cut out, and
    transformed again (`_cut`).
 
+6. **Sum a tile's slabs before transforming back** (`planes._tile`). Each
+   slab's light is summed straight into a patch with the group's deepest
+   margin, transformed, and moved on to the middle plane; the slabs'
+   spectra are added, and one inverse transform serves them all. S slabs
+   cost S + 1 transforms, not 2S. The patch, the running sum and the
+   transform's workspace must fit the GPU together: three patch-sized
+   arrays, which is why the transform's plan cache is cleared after each
+   slab.
+7. **Never write zeros.** All the light is within the cone, a circle in
+   the spectrum covering 65% of it. Blocks of columns outside the circle
+   are skipped, and within a block only the rows inside it are read or
+   written (`planes._cone`). Bands of a plane with no light are not
+   written at all. The files are sparse: what is not written reads as
+   zeros and takes no room. Each group gets a new scratch file so this
+   holds. The 4 cm spectrum takes 33 GB on disk, not 51.
+
 **Results.**
 
-| | Old (in-memory carry) | Plane to plane |
-|---|---|---|
-| 4 cm, 27 mm boat | 92 min sum + 26 min spectrum = 118 min | 52 min making planes + 53 min carrying = 105 min |
-| Peak RAM | 26 GB + 3 GB swap | ~4 GB |
-| Extra disk | — | one scratch plane (54 GB), freed at the end |
-| 2 cm | 16 min | 18 min (the old method wasted little at this depth) |
+| 4 cm, 27 mm boat | Sum | Total with maps | Peak RAM |
+|---|---|---|---|
+| In-memory carry (removed) | 92 min + 26 min spectrum | ~2 h | 26 GB + 3 GB swap |
+| Plane to plane, SATA SSD | 105 min | ~1 h 50 min | ~4 GB |
+| + steps 6 and 7, on NVMe | **35 min** (24 min making planes, 11 min carrying) | ~40 min | ~4 GB (RSS is higher: page cache) |
 
-- **Accuracy:** views agree with the old method to 0.04–0.09%.
-- **Bottleneck:** the disk. Each group writes and reads its 54 GB plane
-  and reads and writes the spectrum, about 216 GB of traffic at
-  roughly 470 s a group on SATA.
+- **2 cm:** 878 s by GPU tiles; 1066 s plane to plane; 892 s with steps 6
+  and 7 on SATA.
+- **Accuracy:** views agree with the old method to 0.04–0.09% throughout.
+- **Where the time goes now:** about two thirds in the GPU's point sum,
+  one third carrying planes. On SATA the disk dominated: most of the
+  "making" time there was writing the scratch plane.
+- **Results on another disk:** `HOLOTRACE_OUT=/path` puts results (and
+  the scratch plane) there; the viewer reads the same variable.
 - **Scaling:** cost now grows with plate area × number of groups, not
   depth squared. Depth is no longer limited by memory.
 
@@ -346,8 +391,9 @@ go through `planes.sum_by_groups`:
 | ±24° | 0.75 µm | 5.5 cm | 7.4 cm | 15 cm |
 | ±15° | 1.0 µm | 7.3 cm | 9.9 cm | 20 cm |
 
-A faster disk shortens the carrying half of the run directly: NVMe
-gives roughly 3–6× over SATA, and a 10 Gb/s USB SSD about 2×.
+The disk matters: moving from the SATA SSD to NVMe cut the 4 cm run by
+well over half. 10 cm at ±35° is estimated at 10–12 h on that GPU with
+enough NVMe, or 1–2 h on a rented 4090-class card (not run).
 
 ## 7. The viewer (`viewer.py`)
 
@@ -360,11 +406,31 @@ gives roughly 3–6× over SATA, and a 10 Gb/s USB SSD about 2×.
   inverse-FFTs the patch, padded 2× so the view is smooth. One view covers
   the whole plate.
 - **`eye_view(eye, pupil_radius, depth)`**: a real eye at a finite
-  distance. Up close, each part of the plate is seen from a different
-  direction, so views along the directions to a 9 × 9 lattice of points
-  across the plate are blended bilinearly. This approximates a true
-  finite-distance eye and is good while each part of the plate subtends
-  a small range of angles.
+  distance, which sees each point along its own line to the eye.
+  - **Method.** Light headed for the pupil's middle from all over the
+    plane is a spherical wave closing in on it. Multiplying the plane's
+    light by the opposite phase, e^{+ikr} with r each sample's distance
+    from the eye, brings the waves the pupil takes in to about straight
+    on everywhere, so one filter (the pupil) serves every point. This is
+    what the eye's lens does.
+  - **Cells.** The plane is done in up to 5 × 5 cells, each made from
+    the spectrum patch about the direction from its middle to the eye,
+    wide enough for the whole cell, its border and every lamp direction.
+    Cells overlap by an eighth and are cross-faded.
+  - **Details.** The phase is computed in double precision (millions of
+    radians, nearly cancelling). The pupil is a disc facing the cell, so
+    seen obliquely it is an ellipse in sine space. Its edge is shaded
+    over one spectrum sample. A lamp tilt moves the pupil's place in the
+    cell's spectrum, so all of a wavelength's tilts share one transform.
+  - **Accuracy.** Against brute force: 0.4–1.2% with one cell; 2–7% with
+    2–3 cells on a 4 mm plate (correlation 0.997–0.999), from the far
+    tails of the pupil's blur being cut at each cell's edge. Larger
+    plates have larger cells and smaller error.
+  - **The earlier version was wrong about speckle.** It blended far-away
+    views toward a 9 × 9 lattice of points. Neighbouring views were up
+    to 1° apart, wider than the pupil (0.76°), so each pixel averaged up
+    to four independent speckle patterns. It reported a laser contrast
+    of 0.72 where a single view, and the new method, give 1.04.
 - **Light sources.** Each source is a list of replays
   (wavelength offset, tilt), whose brightness is added:
   - `LASER`: one replay.
@@ -380,8 +446,11 @@ gives roughly 3–6× over SATA, and a 10 Gb/s USB SSD about 2×.
 - **Movies.** `holotrace view NAME --eye 300 --focus 0 [--source 0.02]`
   sweeps the eye across and back, then up and back, as far as it can
   while still seeing the whole plate: 96 frames.
-  - Laser: about 2 min.
-  - Lamp (111 replays per view): about 1 h.
+  - Laser: about 6 s a frame at 4 cm.
+  - Lamp (111 replays): about 26 s a frame at 4 cm, 5 s at 2 cm.
+
+  The movies in `out/` made before this change used the blended view,
+  which understates laser speckle.
 
 **Known viewer artifact.** With the sharp far-away test eye (numerical
 aperture 0.03), the views focused on the bow show a dark diagonal band
@@ -397,7 +466,12 @@ and points 12–32 µm apart put 10–80 points in each cell.
 
 Contrast below is std / local mean on smooth lit surfaces in real-eye
 views (30 cm, 4 mm pupil). The second number includes the retina's blur:
-1 arcmin, about 87 µm at 30 cm.
+1 arcmin, about 87 µm at 30 cm. Fully developed speckle has contrast 1.
+
+**The numbers in §8.2 were measured with the earlier, blended real-eye
+view, which understated contrast (0.72 where the truth is 1.04). Its
+conclusion stands, since the trend was measured under one viewer. §8.3
+is re-measured with the corrected view.**
 
 ### 8.1 Optimizing the phases: parked, and why
 
@@ -443,18 +517,18 @@ from the plate × θ, small for an image-plane hologram.
 
 | Source width (rad) | 2 cm boat | 4 cm boat | 4 cm, after the retina's blur |
 |---|---|---|---|
-| 0 (laser) | 0.72 | 0.72 | 0.29 |
-| 0.01 | 0.42 | 0.38 | 0.20 |
-| 0.02 | 0.37 | 0.32 | 0.19 |
-| 0.04 | 0.30 | 0.26 | 0.16 |
+| 0 (laser) | 1.04 | 1.05 | 0.39 |
+| 0.01 | 0.50 | 0.50 | 0.25 |
+| 0.02 | 0.40 | 0.41 | 0.22 |
+| 0.04 | 0.31 | 0.30 | 0.18 |
 
-0.02 rad (a 2 cm diffuser 1 m away) suits the 4 cm boat: speckle about
-halved, and the deepest parts still sharp. Nothing in the hologram
+0.02 rad (a 2 cm diffuser 1 m away) suits the 4 cm boat: speckle cut to
+about 40% of a laser's, and the deepest parts still sharp. Nothing in the hologram
 changes. The practical conclusion for a print is to **light it with a
 red LED behind a diffuser 1–2 cm across, about a metre away**, not a
 laser.
 
-The retina-blurred contrast levels off near 0.16. Part of that is the
+The retina-blurred contrast levels off near 0.18. Part of that is the
 boat's real shading, which the metric also counts. A speckle-free
 reference, averaged over many random phase sets, was not made, so the
 split is not measured.
@@ -471,10 +545,11 @@ split is not measured.
   one glossy highlight, one disc light.
 - **32 × 32 directions per point** (about 2.2° apart at ±35°): highlights
   and occlusion edges are blended between those directions.
-- **Recording-plane error** of 1.2–1.6% at ±35° (§5.1).
-- **Viewer approximations:** the eye at a finite distance is a blend of
-  far-away views (§7), and the LED and lamp use a handful of discrete
-  wavelengths.
+- **Recording-plane error:** 1.2–1.6% in view brightness, and 4–5% in
+  the field's amplitude within most of the cone, more at its edge (§4).
+- **Viewer approximations:** the real eye's view is cut into cells (§7),
+  and the LED and lamp use a handful of discrete wavelengths and
+  directions.
 - **Monochrome**, at 633 nm.
 
 ## 10. File map
@@ -503,13 +578,14 @@ separately). A non-default turn is added as `-turn15`.
 
 ```
 uv run --extra gpu holotrace benchy --plate 20.48 --scale 6 --spacing 12 --turn 15 --pixel 0.25 --cone 35 --slab 600
-#   2 cm plate, 1 cm boat: ~18 min, 13 GB spectrum
+#   2 cm plate, 1 cm boat: ~17 min, 13 GB spectrum (8 GB on disk)
 uv run --extra gpu holotrace benchy --plate 40.96 --scale 16 --spacing 32 --pixel 0.25 --cone 35 --slab 600
-#   4 cm plate, 27 mm boat: ~1 h 45 min, 54 GB spectrum plus 54 GB scratch while running
+#   4 cm plate, 27 mm boat: ~40 min on NVMe (set HOLOTRACE_OUT to a folder on it);
+#   the spectrum 33 GB on disk, and up to 54 GB of scratch while running
 uv run --extra gpu holotrace view benchy-40.96mm-32um-35deg-0.25um-boat16 --eye 300 --focus 0
-#   real-eye movie, laser: ~2 min
+#   real-eye movie, laser: ~10 min
 uv run --extra gpu holotrace view benchy-40.96mm-32um-35deg-0.25um-boat16 --eye 300 --focus 0 --source 0.02
-#   the same lit by a lamp 0.02 rad across: ~1 h
+#   the same lit by a lamp 0.02 rad across: ~40 min
 ```
 
 If a run prints nothing for more than a minute after starting, Mitsuba
@@ -531,7 +607,13 @@ In the order recommended:
 3. **Go bigger** (§6.4). It needs only disk: 10 cm at ±35° needs about
    670 GB and roughly 2–3 days on a SATA SSD, much less on NVMe and a
    newer GPU.
-4. **Smaller items:**
+4. **Fade each point's light past the cone** (§4), to test whether the
+   field's 4–5% error is the sharp cut-off's ripple. If it is, planes
+   could sit closer to their points and slabs be thinner, which is also
+   about 2× faster on the GPU.
+5. **Smaller items:**
+   - retry Mitsuba's start automatically when it hangs;
+   - add two groups per pass over the spectrum (a few minutes a run);
    - richer materials;
    - a glass scene, to test the original magnifying-glass idea at scale;
    - automated tests for the checks in §4;

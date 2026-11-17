@@ -493,11 +493,17 @@ class SeenPoints:
     def _phase(self, phases):
         return cp.asarray(((self.k * self.depth + phases) % (2 * math.pi)).astype(np.float32))
 
-    def light(self, phases):
+    def light(self, phases, into=None):
         """Their light on the plate (on the GPU), each starting with its
-        phase."""
+        phase. With `into` (an array and the pixel its corner is at, x
+        then y), the light is added to that array instead, which must
+        hold the whole tile."""
         ox, oy, tw, th = self.tile
-        light = cp.zeros((th, tw), cp.complex64)
+        if into is None:
+            light = cp.zeros((th, tw), cp.complex64)
+        else:
+            light, ox, oy = into
+            tw = light.shape[1]
         f32, i32 = np.float32, np.int32
         if self.blocks == 0:
             return light

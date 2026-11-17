@@ -36,8 +36,8 @@ plate's light, and so a different speckle, from each. Speckle averages
 away once the lamp is wider than the pupil seen from the scene (twice
 its numerical aperture), while the image blurs only by the lamp's width
 times each point's distance from the plate: little, for a scene at the
-plate. A lamp 0.02 rad across (2 cm, 1 m off) roughly halves the speckle
-a real eye sees.
+plate. A lamp 0.02 rad across (2 cm, 1 m off) cuts the speckle a real
+eye sees to about 40% of a laser's.
 """
 
 import json
@@ -54,6 +54,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from .magnifier import CONE, REFERENCE, WAVELENGTH, sheet
+from .solid import results
 
 # An LED's light, as replays averaged: wavelengths about the middle, in
 # um, and directions its light arrives from across the plate (radians:
@@ -159,43 +160,174 @@ class Look:
         block = s.shape[2]
         return s[(kx // block)[None, :], ky[:, None], (kx % block)[None, :]]
 
-    def eye_view(self, eye, pupil, depth, grid=9):
+    def eye_view(self, eye, pupil, depth, grid=None):
         """What an eye at `eye` (x, y, and its distance in front of the
         plate, in um) sees through a pupil of radius `pupil` (um), focused
         `depth` behind the plate: an array covering the whole plate.
 
-        Up close, different parts of the plate are seen from different
-        directions: the eye sees each point of the plane in focus along
-        the line from it to the eye. So views along the directions to a
-        `grid` x `grid` lattice of points across the plate are blended,
-        each part of the image from the directions of the points around
-        it (bilinearly). The pupil's numerical aperture is its radius over
-        its distance."""
+        Up close, the eye sees each point of the plane in focus along the
+        line from it to the eye: through its pupil pass the plane waves
+        about that direction, a different one for every point. Light
+        headed for the middle of the pupil from all over the plane is a
+        wave closing in on it, a sphere; so the light in the plane is
+        multiplied by the opposite of that sphere's phase, which brings
+        the waves the pupil takes in, wherever they are from, to about
+        straight on, and then one filter, the pupil's, serves for every
+        point. (This is what the eye's lens does.)
+
+        The plane is done in `grid` x `grid` cells (as many as keep each
+        far wider than the eye's blur, up to 5), since near one point the
+        light the pupil takes in from thereabouts is within a small patch
+        of the spectrum: each cell's light, and a border's, is made from
+        the patch about the direction from its middle to the eye, wide
+        enough for the whole cell and for every direction of the lamp;
+        multiplied by the sphere's phase; and filtered, once for each
+        direction of the lamp, whose tilt moves the pupil's place in the
+        spectrum (and, with the focus off the plate, shifts the image).
+        The pupil is a disc facing the cell, so seen from the side it
+        takes in a narrower range of directions that way."""
         ex, ey, distance = eye
-        aperture = pupil / distance
-        nodes = np.linspace(-self.width / 2, self.width / 2, grid)
-        views = {}
-        for j, qy in enumerate(nodes):
-            for i, qx in enumerate(nodes):
-                v = np.array([ex - qx, ey - qy, distance + depth])
-                views[i, j] = self.view(tuple(v[:2] / np.linalg.norm(v)), aperture, depth)
-        size = views[0, 0].shape[0]
-        # Where each pixel is among the nodes (the view's pixel j is j /
-        # size of the way across the plate).
-        f = np.arange(size) / size * (grid - 1)
-        i0 = np.minimum(f.astype(int), grid - 2)
-        a = f - i0
-        out = np.zeros((size, size))
-        for di in (0, 1):
-            for dj in (0, 1):
-                wx = a if di else 1 - a
-                wy = a if dj else 1 - a
-                for j in range(grid - 1):
-                    rows = i0 == j
-                    for i in range(grid - 1):
-                        cols = i0 == i
-                        block = views[i + di, j + dj][np.ix_(rows, cols)]
-                        out[np.ix_(rows, cols)] += block * wy[rows][:, None] * wx[cols][None, :]
+        n, width, sine = self.n, self.width, self.reference
+        far = distance + depth
+        if grid is None:
+            blur = WAVELENGTH * far / pupil
+            grid = int(max(1, min(5, width / (64 * blur))))
+        centres = (np.arange(grid) + 0.5) / grid * width - width / 2
+        reach = width / grid * 0.625  # half a cell and its border, an eighth of a cell
+
+        def toward(x, y):
+            """The eye's distance from (x, y) in the plane in focus, and
+            its direction from there (sines)."""
+            r = np.sqrt((ex - x) ** 2 + (ey - y) ** 2 + far**2)
+            return r, (ex - x) / r, (ey - y) / r
+
+        by_offset = {}
+        for offset, tilt in self.light:
+            by_offset.setdefault(offset, []).append(tilt if isinstance(tilt, tuple) else (tilt, 0.0))
+        shortest = WAVELENGTH + min(by_offset)
+        widest = max(math.hypot(*t) for tilts in by_offset.values() for t in tilts)
+        # How far directions to the eye differ within a cell and its
+        # border, and the widest the pupil looks from any cell.
+        spread = aperture = 0.0
+        for qy in centres:
+            for qx in centres:
+                r, dx, dy = toward(qx, qy)
+                aperture = max(aperture, pupil / r)
+                for cx in (qx - reach, qx + reach):
+                    for cy in (qy - reach, qy + reach):
+                        _, ax, ay = toward(cx, cy)
+                        spread = max(spread, math.hypot(ax - dx, ay - dy))
+        m = int(math.ceil((aperture + spread + widest) / shortest * width)) + 2
+        m_spread = int(math.ceil(spread / shortest * width)) + 1
+        # The plane's samples: enough for the patch, and for what the
+        # sphere's phase moves it by; a whole number to a cell's eighth.
+        size = -(-(2 * (m + m_spread) + 2) // (8 * grid)) * 8 * grid
+        while cufft.next_fast_len(size) != size:
+            size += 8 * grid
+        cell, border = size // grid, size // (8 * grid)
+        crop = cell + 2 * border
+        across = width * crop / size  # a cell and its border, um
+        m_pupil = int(math.ceil(aperture / shortest * across)) + 1
+        # The image: a whole number of pixels to a cell's eighth, twice
+        # as many samples as its light's patch so that it is smooth.
+        pixels = -(-(4 * m_pupil + 2) // 10) * 8
+        while cufft.next_fast_len(pixels * 5 // 4) != pixels * 5 // 4:
+            pixels += 8
+        image = pixels * 5 // 4
+        out = np.zeros((grid * pixels, grid * pixels))
+        kept = width / n
+        count = len(self.light)
+        for iy, qy in enumerate(centres):
+            for ix, qx in enumerate(centres):
+                r, dx, dy = toward(qx, qy)
+                # The cell's samples (and beyond the plate's edges, the
+                # other side's: the plate's light repeats), where they
+                # are, and how far from the eye.
+                jx = ix * cell - border + np.arange(crop)
+                jy = iy * cell - border + np.arange(crop)
+                x = ((jx * n / size - n / 2 + 0.5) * kept)[None, :]
+                y = ((jy * n / size - n / 2 + 0.5) * kept)[:, None]
+                away = np.sqrt((ex - x) ** 2 + (ey - y) ** 2 + far**2)
+                total = 0
+                for offset, tilts in by_offset.items():
+                    lam = WAVELENGTH + offset
+                    # How far this wavelength shifts the spectrum, up.
+                    up = (1 / lam - 1 / WAVELENGTH) * sine
+                    mx = int(round(dx / lam * width))
+                    my = int(round((dy / lam - up) * width))
+                    kx = np.arange(mx - m, mx + m + 1)
+                    ky = np.arange(my - m, my + m + 1)
+                    patch = cp.asarray(self._patch(ky % n, kx % n))
+                    sx = cp.asarray((kx / width * lam)[None, :], cp.float32)
+                    sy = cp.asarray(((ky / width + up) * lam)[:, None], cp.float32)
+                    cos = cp.sqrt(cp.maximum(0, 1 - sx * sx - sy * sy))
+                    patch = patch * cp.exp((-2j * math.pi / lam) * cos * depth).astype(cp.complex64)
+                    padded = cp.zeros((size, size), cp.complex64)
+                    c = size // 2
+                    padded[c - m : c + m + 1, c - m : c + m + 1] = patch
+                    del patch
+                    plane = cufft.ifft2(cp.fft.ifftshift(padded), overwrite_x=True)
+                    del padded
+                    here = plane[cp.asarray(jy % size)[:, None], cp.asarray(jx % size)[None, :]]
+                    del plane
+                    # The phase the patch's middle took off, put back, and
+                    # the sphere's taken off: worked out in double
+                    # precision (they are millions of radians, nearly
+                    # cancelling).
+                    turns = ((mx * jx) % size)[None, :] / size + ((my * jy) % size)[:, None] / size + up * y + away / lam
+                    here = here * cp.asarray(np.exp(2j * math.pi * (turns % 1.0)).astype(np.complex64))
+                    spectrum = cufft.fft2(here, overwrite_x=True)
+                    del here
+                    slant = 1 - dx * dx - dy * dy
+                    for tx, ty in tilts:
+                        # The lamp's tilt, as a shift of the spectrum, and
+                        # (in sines) of every direction.
+                        shift = (tx / lam, ty * math.sqrt(1 - sine * sine) / lam)
+                        ux = int(round(-shift[0] * across)) + np.arange(-m_pupil, m_pupil + 1)
+                        uy = int(round(-shift[1] * across)) + np.arange(-m_pupil, m_pupil + 1)
+                        part = spectrum[cp.asarray(uy % crop)[:, None], cp.asarray(ux % crop)[None, :]]
+                        gx, gy = (ux / across)[None, :], (uy / across)[:, None]
+                        # Directions from the pupil's middle, and whether
+                        # they pass the pupil, a disc facing this way.
+                        ax, ay = (gx + shift[0]) * lam, (gy + shift[1]) * lam
+                        # (Its edge is shaded over one sample of the
+                        # spectrum, as the share of that sample inside.)
+                        off = np.sqrt(ax * ax + ay * ay + (dx * ax + dy * ay) ** 2 / slant)
+                        seen = np.clip((pupil / r - off) / (lam / across) + 0.5, 0, 1)
+                        # With the focus off the plate, the tilt shifts
+                        # what is seen (it turns about the plate).
+                        sx_, sy_ = shift[0] * lam, shift[1] * lam
+                        along = dx * sx_ + dy * sy_
+                        move_x = sx_ / math.sqrt(slant) + dx * along / slant**1.5
+                        move_y = sy_ / math.sqrt(slant) + dy * along / slant**1.5
+                        factor = seen * np.exp(2j * math.pi * depth * (gx * move_x + gy * move_y))
+                        padded = cp.zeros((image, image), cp.complex64)
+                        c = image // 2
+                        padded[c - m_pupil : c + m_pupil + 1, c - m_pupil : c + m_pupil + 1] = part * cp.asarray(
+                            factor.astype(np.complex64)
+                        )
+                        total = total + cp.abs(cufft.ifft2(cp.fft.ifftshift(padded), overwrite_x=True)) ** 2
+                    del spectrum
+                # The cell's image and its border's: faded in across the
+                # border and out across the next cell's, so that where
+                # two cells' images overlap (they are of the same thing,
+                # and differ only in the faint far reaches of the pupil's
+                # blur, cut off at each one's edge) one gives way to the
+                # other smoothly. Past the plate's edges it is the other
+                # side's, as the light is.
+                edge = pixels // 8
+                seen = cp.asnumpy(total) / count
+                at = (np.arange(image) + 0.5) / image
+                fade = np.clip(np.minimum(at, 1 - at) * image / (2 * edge), 0, 1)
+                # As bright as from each place, not from the cell's
+                # middle: the pupil looks smaller from farther off.
+                px = (at * across + qx - across / 2)[None, :]
+                py = (at * across + qy - across / 2)[:, None]
+                seen *= r**2 / toward(px, py)[0] ** 2 * fade[None, :] * fade[:, None]
+                rows = (iy * pixels - edge + np.arange(image)) % (grid * pixels)
+                cols = (ix * pixels - edge + np.arange(image)) % (grid * pixels)
+                np.add.at(out, (rows[:, None], cols[None, :]), seen)
+        cp.get_default_memory_pool().free_all_blocks()
         return out
 
     def _middle(self, view):
@@ -243,7 +375,7 @@ def main():
         samples = lamp(across)
         light = f"lamp{across:g}rad"
     distance = _option("--eye", 0.0)  # mm; 0 for an eye infinitely far
-    out = Path("out") / name
+    out = results() / name
     start = time.time()
     look = Look.load(out / "spectrum.npy", samples)
     cone = look.cone
@@ -291,7 +423,7 @@ def compare():
     tiles = []
     for name in _names():
         for light, samples in LIGHTS.items():
-            look = Look.load(Path("out") / name / "spectrum.npy", samples)
+            look = Look.load(results() / name / "spectrum.npy", samples)
             view = look.view((0.0, 0.0), pupil, 0.0)
             tiles.append((f"{name}, {light}", look.image(view, look.scale(view), "", width=600)))
     sheet(tiles, columns=2).save("out/compare.png")

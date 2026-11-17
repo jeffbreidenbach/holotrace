@@ -60,8 +60,10 @@ uv run --extra gpu holotrace benchy --plate 20.48 --scale 6 --spacing 12 --turn 
 #   a 2 cm plate, the boat 1 cm long: about 20 min, the spectrum 13 GB on disk
 # Plates too big for memory are summed plane to plane (see planes.py): groups of
 # slabs carried a short way, then each group's plane to the plate in one go.
+# HOLOTRACE_OUT=/path/on/a/fast/disk puts results there instead of out/: with it
+# on an NVMe drive the 4 cm plate below takes about 40 min, on a SATA SSD over an hour.
 uv run --extra gpu holotrace benchy --plate 40.96 --scale 16 --spacing 32 --pixel 0.25 --cone 35 --slab 600
-#   a 4 cm plate, the boat 2.7 cm long: the spectrum 54 GB on disk, and as much again while it is made
+#   a 4 cm plate, the boat 2.7 cm long: the spectrum 33 GB on disk, and up to 54 GB more while it is made
 uv run --extra gpu holotrace view benchy --focus 0   # a movie: eye moving side to side, up and down
 uv run --extra gpu holotrace view NAME --eye 300     # ... seen by a real eye 30 cm away, 4 mm pupil
 uv run --extra gpu holotrace view NAME --eye 300 --source 0.02   # ... lit by a lamp 2 cm across, 1 m off: far less speckle
