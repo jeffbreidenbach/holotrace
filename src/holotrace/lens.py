@@ -1,6 +1,6 @@
 """A glass lens, and rays traced through it exactly.
 
-Lengths are in micrometres. The lens's axis is the z axis, and light
+Lengths are in micrometers. The lens's axis is the z axis, and light
 travels toward +z: from the scene, through the lens, to the plate.
 
 A direction is given by its tangent (dx/dz, dy/dz), which is convenient

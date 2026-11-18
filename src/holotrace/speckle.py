@@ -3,7 +3,7 @@
 The solid scene of step 3 (solid.py), but each point's phase, so far
 random, is chosen to make the eye's views look like the scene without
 speckle. Only the points' brightness is set by the scene; their phases
-are free, and with random ones, neighbouring points' light interferes at
+are free, and with random ones, neighboring points' light interferes at
 random, which is speckle.
 
 What is optimized is meant to be the plate as it would be printed:

@@ -36,9 +36,9 @@ Anyone changing the code needs these.
 
 | Thing | Convention |
 |---|---|
-| Units | Micrometres throughout. Wavelength `WAVELENGTH = 0.633` (HeNe red) in `magnifier.py`. |
-| Geometry | The plate is the plane z = 0, centred on the axis. The viewer is at +z. A point's **depth** is −z: positive behind the plate, negative in front. |
-| Pixels | Pixel index i sits at x = (i − n/2 + 0.5) · pitch (`coordinate` in `gpu.py`); grids are centred. |
+| Units | Micrometers throughout. Wavelength `WAVELENGTH = 0.633` (HeNe red) in `magnifier.py`. |
+| Geometry | The plate is the plane z = 0, centered on the axis. The viewer is at +z. A point's **depth** is −z: positive behind the plate, negative in front. |
+| Pixels | Pixel index i sits at x = (i − n/2 + 0.5) · pitch (`coordinate` in `gpu.py`); grids are centered. |
 | Cone | `cone` is the **tangent** of the widest angle the scene's light reaches the plate at; `Optics.sine` is its sine. Light outside the cone is never computed or kept. |
 | Reference beam | Given as a sine (`Optics.reference`), tilted in y. |
 | Phases | Each point gets a random starting phase from `np.random.default_rng(1)`, so runs are repeatable. |
@@ -114,7 +114,7 @@ value  = map(t) · (1 + |t|²)^(−3/4) / |depth| · e^{i (k·extra + phase)}
 few for a phase of tens of thousands of radians. So the large part of
 each path, k · depth, is folded into the point's starting phase on the
 CPU in double precision, and the kernel only handles `extra`, which is
-at most tens of micrometres.
+at most tens of micrometers.
 
 **Batching.** One launch per point cost more than the sum itself;
 launching all points at once made it about 3× faster. There is a matching
@@ -508,7 +508,7 @@ million of them seen at all.
     wide enough for the whole cell, its border and every lamp direction.
     Cells overlap by an eighth and are cross-faded.
   - **Details.** The phase is computed in double precision (millions of
-    radians, nearly cancelling). The pupil is a disc facing the cell, so
+    radians, nearly canceling). The pupil is a disc facing the cell, so
     seen obliquely it is an ellipse in sine space. Its edge is shaded
     over one spectrum sample. A lamp tilt moves the pupil's place in the
     cell's spectrum, so all of a wavelength's tilts share one transform.
@@ -517,7 +517,7 @@ million of them seen at all.
     tails of the pupil's blur being cut at each cell's edge. Larger
     plates have larger cells and smaller error.
   - **The earlier version was wrong about speckle.** It blended far-away
-    views toward a 9 × 9 lattice of points. Neighbouring views were up
+    views toward a 9 × 9 lattice of points. Neighboring views were up
     to 1° apart, wider than the pupil (0.76°), so each pixel averaged up
     to four independent speckle patterns. It reported a laser contrast
     of 0.72 where a single view, and the new method, give 1.04.
@@ -621,7 +621,7 @@ from the plate × θ, small for an image-plane hologram.
 0.02 rad (a 2 cm diffuser 1 m away) suits the 4 cm boat: speckle cut to
 about 40% of a laser's, and the deepest parts still sharp. Nothing in the hologram
 changes. The practical conclusion for a print is to **light it with a
-red LED behind a diffuser 1–2 cm across, about a metre away**, not a
+red LED behind a diffuser 1–2 cm across, about a meter away**, not a
 laser.
 
 The retina-blurred contrast levels off near 0.18. Part of that is the

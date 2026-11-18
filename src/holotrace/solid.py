@@ -37,7 +37,7 @@ import numpy as np
 from . import planes
 from .magnifier import PLATE, PUPIL, WAVELENGTH, sheet
 
-# Lengths in micrometres.
+# Lengths in micrometers.
 BALL_Z, BALL_RADIUS = -150.0, 350.0
 WALL_Z, WALL_HALF, CHECK = -600.0, 1100.0, 150.0
 SPACING = 8.0
@@ -396,7 +396,7 @@ def moved(waves, fx, fy, distance, limit_x, limit_y, out=None):
     turned by its own phase, the rest zero. In one pass on the GPU. The
     phase is worked out as the distance's own (kept to a whole turn on
     the way in) plus what the wave's slant takes off it, which single
-    precision holds to a thousandth of a radian over centimetres."""
+    precision holds to a thousandth of a radian over centimeters."""
     import cupy as cp
 
     global _MOVED

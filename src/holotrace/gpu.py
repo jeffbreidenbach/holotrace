@@ -7,7 +7,7 @@ plate, but one GPU thread per pixel. Rays are still found on the CPU
 GPUs are fast in single precision, which holds about 7 digits: too few
 for a phase of tens of thousands of radians. So each kernel works only
 with the small part of a point's path length that varies across the
-plate (tens of micrometres at most), and the rest, the same for every
+plate (tens of micrometers at most), and the rest, the same for every
 pixel, is folded into its starting phase, on the CPU in double
 precision.
 

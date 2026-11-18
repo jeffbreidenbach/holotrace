@@ -88,7 +88,7 @@ class Plate:
         The ray to each pixel is found exactly, by aiming through the lens
         (see Lens.aim), on a grid `coarse` pixels apart, and its path
         length and strength interpolated in between: they change so slowly
-        that over 8 um the error is a nanometre or so. The rays for every
+        that over 8 um the error is a nanometer or so. The rays for every
         point are aimed together, since tracing a few large batches is far
         faster than many small ones."""
         grids = [self._lens_grid(point, lens, coarse) for point in points]

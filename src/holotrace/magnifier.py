@@ -27,7 +27,7 @@ from .eye import Eye
 from .lens import Lens
 from .plate import Plate
 
-# Lengths in micrometres.
+# Lengths in micrometers.
 WAVELENGTH = 0.633  # a helium-neon laser's red
 PLATE = dict(size=4096, pitch=0.5, wavelength=WAVELENGTH)
 LENS = Lens(z=-300, radius=3000, aperture=500)
@@ -203,7 +203,7 @@ def sharpness(view, pitch, half):
 
 
 def picture(view, pitch, half=700, shrink=4):
-    """The middle of a view, `half` either way, as a grey image, averaged
+    """The middle of a view, `half` either way, as a gray image, averaged
     over `shrink` pixels each way and brightened (square root)."""
     n = view.shape[0]
     m = int(half / pitch)
@@ -254,7 +254,7 @@ def main(gpu=False):
 
 
 def sheet(tiles, columns=2):
-    """The views in rows of `columns`, each labelled."""
+    """The views in rows of `columns`, each labeled."""
     w, h = tiles[0][1].size
     label = 22
     rows = math.ceil(len(tiles) / columns)

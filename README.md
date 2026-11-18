@@ -39,7 +39,7 @@ check it before anything is printed.
 So far these holograms exist only in the computer's imagination. I'm
 looking for collaborators to help bring them into the physical world.
 The hard part is the printing: the plate's pixels are 0.25 µm across,
-its fringes mostly about 1 µm apart, over an area centimetres wide. If
+its fringes mostly about 1 µm apart, over an area centimeters wide. If
 you can write patterns that fine, or have an idea for doing it economically,
 please get in contact.
 

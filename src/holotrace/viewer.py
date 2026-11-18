@@ -16,7 +16,7 @@ what changes.
 Its pupil's numerical aperture is P (default 0.03: sharper than a real
 eye's at reading distance, about 0.01, which at this size would blur
 the scene and hardly see depth). With --eye, the eye is instead a real
-one MM millimetres away, its pupil --pupil-mm across (default 4), seeing
+one MM millimeters away, its pupil --pupil-mm across (default 4), seeing
 each part of the plate from its own direction (see Look.eye_view); it
 moves as far as it can and still see the whole plate.
 
@@ -58,7 +58,7 @@ from .solid import results
 
 # An LED's light, as replays averaged: wavelengths about the middle, in
 # um, and directions its light arrives from across the plate (radians:
-# a source a few mm across, some metres off).
+# a source a few mm across, some meters off).
 LED = [(0.0, 0.0), (-0.008, 0.0), (0.008, 0.0), (0.0, -0.001), (0.0, 0.001)]
 LASER = [(0.0, 0.0)]
 
@@ -212,7 +212,7 @@ class Look:
         if grid is None:
             blur = WAVELENGTH * far / pupil
             grid = int(max(1, min(5, width / (64 * blur))))
-        centres = (np.arange(grid) + 0.5) / grid * width - width / 2
+        centers = (np.arange(grid) + 0.5) / grid * width - width / 2
         reach = width / grid * 0.625  # half a cell and its border, an eighth of a cell
 
         def toward(x, y):
@@ -229,8 +229,8 @@ class Look:
         # How far directions to the eye differ within a cell and its
         # border, and the widest the pupil looks from any cell.
         spread = aperture = 0.0
-        for qy in centres:
-            for qx in centres:
+        for qy in centers:
+            for qx in centers:
                 r, dx, dy = toward(qx, qy)
                 aperture = max(aperture, pupil / r)
                 for cx in (qx - reach, qx + reach):
@@ -257,8 +257,8 @@ class Look:
         out = np.zeros((grid * pixels, grid * pixels))
         kept = width / n
         count = len(self.light)
-        for iy, qy in enumerate(centres):
-            for ix, qx in enumerate(centres):
+        for iy, qy in enumerate(centers):
+            for ix, qx in enumerate(centers):
                 r, dx, dy = toward(qx, qy)
                 # The cell's samples (and beyond the plate's edges, the
                 # other side's: the plate's light repeats), where they
@@ -293,7 +293,7 @@ class Look:
                     # The phase the patch's middle took off, put back, and
                     # the sphere's taken off: worked out in double
                     # precision (they are millions of radians, nearly
-                    # cancelling).
+                    # canceling).
                     turns = (cp.asarray((mx * jx) % size)[None, :] / size + cp.asarray((my * jy) % size)[:, None] / size
                              + up * y + away / lam)
                     here = here * cp.exp(2j * math.pi * (turns % 1.0)).astype(cp.complex64)

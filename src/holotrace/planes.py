@@ -6,7 +6,7 @@ its way to the plate: the deeper the scene, the bigger the margins, and
 the more of each patch is worked out only to be thrown away, until the
 patches no longer fit in memory at all.
 
-Here the slabs are taken in groups a few millimetres deep instead. Each
+Here the slabs are taken in groups a few millimeters deep instead. Each
 group's slabs are carried, tile by tile as before but only a short way,
 to a plane in the group's middle, so the margins stay small. That plane,
 the whole plate's width of it, is then carried to the plate in one go:

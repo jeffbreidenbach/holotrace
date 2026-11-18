@@ -10,7 +10,7 @@ does for shading), so rays bend almost as at the true surface. How fine
 the mesh needs to be is what step 2 measures.
 
 Mitsuba works in single precision. Its points are good to about 0.1 nm
-over the few millimetres here, well within what phase needs.
+over the few millimeters here, well within what phase needs.
 """
 
 import math
