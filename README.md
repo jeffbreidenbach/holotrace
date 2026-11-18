@@ -65,6 +65,8 @@ uv run --extra gpu holotrace benchy --plate 20.48 --scale 6 --spacing 12 --turn 
 # Each scene's brightness maps are kept beside its results, so a rerun skips Mitsuba.
 uv run --extra gpu holotrace benchy --plate 40.96 --scale 16 --spacing 32 --pixel 0.25 --cone 35 --slab 300
 #   a 4 cm plate, the boat 2.7 cm long: the spectrum 33 GB on disk, and 50 to 200 GB more while it is made (as the disk allows)
+#   add --wall for a checkered wall behind the boat, which it hides in part and shadows, wide enough
+#   that no edge of it is seen from anywhere: about 1.5 hours, and 200 GB of disk while it is made
 uv run --extra gpu holotrace view benchy --focus 0   # a movie: eye moving side to side, up and down
 uv run --extra gpu holotrace view NAME --eye 300     # ... seen by a real eye 30 cm away, 4 mm pupil
 uv run --extra gpu holotrace view NAME --eye 300 --source 0.02   # ... lit by a lamp 2 cm across, 1 m off: far less speckle

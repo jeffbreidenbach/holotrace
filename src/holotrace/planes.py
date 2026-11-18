@@ -25,9 +25,10 @@ the file, which read as zeros.
 
 The plane's transform is periodic: light leaving one side would come
 back in the other. As long as all the scene's light lands on the plate,
-nothing does. If some lands beyond, the planes are made wider than the
-plate, by as much as it spreads, and the plate is cut out of the sum at
-the end and transformed afresh.
+nothing does. Groups some of whose light lands beyond are summed on
+their own, on planes wider than the plate by enough that what comes back
+falls short of it; the plate is cut out of their sum and transformed
+afresh, and the other groups are added to that.
 """
 
 import math
@@ -60,54 +61,71 @@ def sum_by_groups(points, light, phases, size, path):
     block = math.gcd(n, BLOCK)
     groups = _groups(points)
 
-    # The planes' width: the plate, or more if the light spreads past it
-    # (each point's light reaches as far as it spreads on the way to its
-    # group's plane and from there to the plate).
-    spread = 0.0
+    # Each group's planes' width: the plate, or more if its light spreads
+    # past it. Light past a plane's side comes back in the other, so the
+    # planes are wide enough that what comes back falls short of the
+    # plate (each point's light reaches as far as it spreads on the way
+    # to its group's plane and from there to the plate), and hold every
+    # point.
+    needs = []
     for middle, slabs in groups:
+        most = 0.0
         for plane, mine in slabs:
             p = points[mine]
             depth = -p[:, 2]
-            reach = np.abs(p[:, :2]).max(axis=1) + o.cone * (np.abs(depth - middle) + abs(middle))
-            spread = max(spread, reach.max())
-    wide = 2 * (int(math.ceil(spread / pitch)) + 8)
+            off = np.abs(p[:, :2]).max(axis=1)
+            reach = off + o.cone * o.fade * (np.abs(depth - middle) + abs(middle))
+            most = max(most, (reach + n * pitch / 2).max(), 2 * off.max())
+        needs.append(int(math.ceil(most / pitch)) + 16)
+    wide = [g for g, need in enumerate(needs) if need > n]
+    narrow = [g for g, need in enumerate(needs) if need <= n]
     width = n
-    while width < wide or solid._fast_len(width) != width:
+    while wide and (width < max(needs) or solid._fast_len(width) != width):
         width += 2 * block
-    edge = (width - n) // 2
 
     out = np.lib.format.open_memmap(path, "w+", np.complex64, (n // block, n, block))
-    sums = out if width == n else _scratch(path, "sum", (width // block, width, block))
     print(f"  kept every {pitch:g} um: {n}^2 pixels, {sum(len(s) for _, s in groups)} slabs in {len(groups)} "
-          f"groups, carried plane to plane{f', on planes {width}^2' if width > n else ''}", flush=True)
-    # As many groups' planes at a time as the disk has room for, beside
-    # the spectrum (twice, if it is to be cut): each pass over the
-    # spectrum then adds them all, and it is read and written less often.
-    whole = 8 * width * width
-    low, high = _cone(width, block)[:2]
-    room = 0.9 * shutil.disk_usage(path.parent).free - (2 if width > n else 1) * whole * 0.65
-    per = PER or max(1, int(room / (whole * (low + width // block - high) / (width // block))))
+          f"groups, carried plane to plane{f', {len(wide)} of them on planes {width}^2' if wide else ''}", flush=True)
     start = time.time()
-    for first in range(0, len(groups), per):
-        made = []
-        for g in range(first, min(first + per, len(groups))):
-            middle, slabs = groups[g]
+
+    def add(some, width, sums, first):
+        """Adds the groups `some`, on planes `width` wide, to `sums` (or,
+        if `first`, puts them there). As many groups' planes at a time as
+        the disk has room for: each pass over the spectrum then adds them
+        all, and it is read and written less often."""
+        blocks = width // block
+        low, high = _cone(width, block)[:2]
+        each = 8 * width * width * (low + blocks - high) / blocks
+        per = PER or max(1, int((0.9 * shutil.disk_usage(path.parent).free - each) / each))
+        for i in range(0, len(some), per):
+            made = []
+            for k, g in enumerate(some[i : i + per]):
+                middle, slabs = groups[g]
+                t = time.time()
+                # A new file each time, so that what is not written is zero.
+                plane = _scratch(path, f"plane{k}", (blocks, width, block))
+                _plane(points, slabs, middle, light, phases, width, plane)
+                made.append((plane, middle))
+                print(f"  group {g + 1} of {len(groups)}, {len(slabs)} slabs, its plane {middle / 1000:+.2f} mm: "
+                      f"made in {time.time() - t:.0f} s; {time.time() - start:.0f} s", flush=True)
             t = time.time()
-            # A new file each time, so that what is not written is zero.
-            plane = _scratch(path, f"plane{g - first}", (width // block, width, block))
-            _plane(points, slabs, middle, light, phases, width, plane)
-            made.append((plane, middle))
-            print(f"  group {g + 1} of {len(groups)}, {len(slabs)} slabs, its plane {middle / 1000:+.2f} mm: made in "
-                  f"{time.time() - t:.0f} s; {time.time() - start:.0f} s", flush=True)
+            _add_carried(made, sums, first=first and i == 0)
+            for plane, _ in made:
+                _remove(plane)
+            del made, plane
+            print(f"  carried to the plate in {time.time() - t:.0f} s; {time.time() - start:.0f} s", flush=True)
+
+    # The wide groups first, summed on their own and the plate cut out of
+    # the sum; then the rest, at the plate's own width, added to that.
+    if wide:
+        sums = _scratch(path, "sum", (width // block, width, block))
+        add(wide, width, sums, True)
         t = time.time()
-        _add_carried(made, sums, first=first == 0)
-        for plane, _ in made:
-            _remove(plane)
-        del made, plane
-        print(f"  carried to the plate in {time.time() - t:.0f} s; {time.time() - start:.0f} s", flush=True)
-    if width > n:
-        _cut(sums, out, edge)
+        _cut(sums, out, (width - n) // 2, path)
         _remove(sums)
+        del sums
+        print(f"  the plate cut out in {time.time() - t:.0f} s; {time.time() - start:.0f} s", flush=True)
+    add(narrow, n, out, not wide)
     out.flush()
     cp.get_default_memory_pool().free_all_blocks()
     return out
@@ -304,28 +322,55 @@ def _add_carried(planes, sums, first):
     cp.fft.config.get_plan_cache().clear()
 
 
-def _cut(sums, out, edge):
+def _cut(sums, out, edge, path):
     """The plate, `edge` pixels in from each side of the planes' spectrum
-    `sums`, as its own spectrum into `out`: `sums` transformed back (along
-    its columns in place, then a band of rows at a time), the plate cut
-    out, and transformed again."""
+    `sums`, as its own spectrum into `out` (new, all zeros): `sums`
+    transformed back along its columns in place, and then along its rows
+    (_cut_rows). `path` is where scratch files go (see _scratch)."""
+    import cupy as cp
+    import cupyx.scipy.fft as cufft
+
+    blocks, width, block = sums.shape
+    for j in np.flatnonzero(_cone(width, block)[2]):
+        sums[j] = cp.asnumpy(cufft.ifft(cp.asarray(sums[j]), axis=0, overwrite_x=True))
+    cp.get_default_memory_pool().free_all_blocks()
+    _cut_rows(sums, out, edge, path)
+
+
+def _cut_rows(sums, out, edge, path):
+    """The rest of _cut: `sums`, already transformed back along its
+    columns, transformed back along its rows, a band at a time (on the
+    GPU 256 rows at a time), the plate cut out, and transformed again:
+    along its rows into a scratch file, then along its columns into
+    `out`. Of the plate's spectrum only what is within the cone is kept
+    (see _cone), as when the planes are no wider than the plate."""
     import cupy as cp
     import cupyx.scipy.fft as cufft
 
     blocks, width, block = sums.shape
     n = out.shape[1]
-    for j in np.flatnonzero(_cone(width, block)[2]):
-        sums[j] = cp.asnumpy(cufft.ifft(cp.asarray(sums[j]), axis=0, overwrite_x=True))
+    low, high, reach = _cone(n, block)
+    half = _scratch(path, "cut", out.shape)
     rows = max(256, BAND // (8 * width) // 256 * 256)
     for r in range(edge, edge + n, rows):
         h = min(rows, edge + n - r)
         band = np.ascontiguousarray(sums[:, r : r + h, :].transpose(1, 0, 2)).reshape(h, width)
-        back = cufft.ifft(cp.asarray(band), axis=1, overwrite_x=True)[:, edge : edge + n]
-        again = cp.asnumpy(cufft.fft(back, axis=1))
-        out[:, r - edge : r - edge + h, :] = again.reshape(h, n // block, block).transpose(1, 0, 2)
-        del back
-    for j in range(out.shape[0]):
-        out[j] = cp.asnumpy(cufft.fft(cp.asarray(out[j]), axis=0, overwrite_x=True))
+        again = np.empty((h, n), np.complex64)
+        for i in range(0, h, 256):
+            back = cufft.ifft(cp.asarray(band[i : i + 256]), axis=1, overwrite_x=True)[:, edge : edge + n]
+            again[i : i + 256] = cp.asnumpy(cufft.fft(back, axis=1))
+            del back
+        blocked = again.reshape(h, n // block, block).transpose(1, 0, 2)
+        half[:low, r - edge : r - edge + h, :] = blocked[:low]
+        half[high:, r - edge : r - edge + h, :] = blocked[high:]
+        del band, again, blocked
+    for j in np.flatnonzero(reach):
+        cols = cufft.fft(cp.asarray(half[j]), axis=0, overwrite_x=True)
+        r = int(reach[j])
+        for part in [slice(None)] if 2 * r >= n else [slice(0, r), slice(n - r, n)]:
+            out[j, part] = cp.asnumpy(cols[part])
+        del cols
+    _remove(half)
     cp.get_default_memory_pool().free_all_blocks()
 
 

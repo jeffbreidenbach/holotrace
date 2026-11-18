@@ -155,7 +155,9 @@ def maps(world, points, normals, albedo, gloss, chunk=4000, shadows=True):
     d /= np.linalg.norm(d, axis=1, keepdims=True)
     half = LIGHT + d
     half /= np.linalg.norm(half, axis=1, keepdims=True)
-    out = np.zeros((len(points), m * m), np.float32)
+    # Half precision is plenty for brightness, and millions of points'
+    # maps then fit in memory.
+    out = np.zeros((len(points), m * m), np.float16)
     lift = 0.05  # off the surface, so as not to meet it
     for s in range(0, len(points), chunk):
         p, n = points[s : s + chunk], normals[s : s + chunk]
@@ -472,7 +474,7 @@ def seen_maps(path, world, points, normals, albedo, gloss, shadows=True):
                 return kept["alive"], kept["light"]
     light = maps(world, points, normals, albedo, gloss, shadows=shadows)
     alive = light.max(axis=(1, 2)) > 0
-    light = light[alive].astype(np.float16)
+    light = light[alive]
     np.savez(path, key=key, alive=alive, light=light)
     return alive, light
 

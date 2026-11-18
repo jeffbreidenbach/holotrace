@@ -73,6 +73,18 @@ def lamp(across, count=7, offsets=(-0.008, 0.0, 0.008)):
     return [(offset, tilt) for offset in offsets for tilt in tilts]
 
 
+def _runs(k, block=None):
+    """Where in `k` (whole numbers) each run of successive numbers starts
+    and ends, a run ending too where the numbers pass a multiple of
+    `block`, if given."""
+    k = np.asarray(k)
+    cut = np.diff(k) != 1
+    if block:
+        cut |= k[1:] % block == 0
+    edges = np.concatenate([[0], np.flatnonzero(cut) + 1, [len(k)]])
+    return list(zip(edges[:-1], edges[1:]))
+
+
 class Look:
     """An eye looking at a plate's light, lit by `light` (LASER or LED):
     replays at each wavelength offset and tilt, their brightness added.
@@ -157,8 +169,16 @@ class Look:
         s = self.spectrum
         if s.ndim == 2:
             return s[np.ix_(ky, kx)]
+        # Stored in blocks of columns, on disk: copied a run of rows and
+        # of columns within a block at a time, which is many times faster
+        # than picking the samples out one by one.
         block = s.shape[2]
-        return s[(kx // block)[None, :], ky[:, None], (kx % block)[None, :]]
+        out = np.empty((len(ky), len(kx)), s.dtype)
+        for r0, r1 in _runs(ky):
+            for c0, c1 in _runs(kx, block):
+                b, c = divmod(int(kx[c0]), block)
+                out[r0:r1, c0:c1] = s[b, int(ky[r0]) : int(ky[r0]) + r1 - r0, c : c + c1 - c0]
+        return out
 
     def eye_view(self, eye, pupil, depth, grid=None):
         """What an eye at `eye` (x, y, and its distance in front of the
@@ -245,9 +265,9 @@ class Look:
                 # are, and how far from the eye.
                 jx = ix * cell - border + np.arange(crop)
                 jy = iy * cell - border + np.arange(crop)
-                x = ((jx * n / size - n / 2 + 0.5) * kept)[None, :]
-                y = ((jy * n / size - n / 2 + 0.5) * kept)[:, None]
-                away = np.sqrt((ex - x) ** 2 + (ey - y) ** 2 + far**2)
+                x = cp.asarray((jx * n / size - n / 2 + 0.5) * kept)[None, :]
+                y = cp.asarray((jy * n / size - n / 2 + 0.5) * kept)[:, None]
+                away = cp.sqrt((ex - x) ** 2 + (ey - y) ** 2 + far**2)
                 total = 0
                 for offset, tilts in by_offset.items():
                     lam = WAVELENGTH + offset
@@ -274,8 +294,10 @@ class Look:
                     # the sphere's taken off: worked out in double
                     # precision (they are millions of radians, nearly
                     # cancelling).
-                    turns = ((mx * jx) % size)[None, :] / size + ((my * jy) % size)[:, None] / size + up * y + away / lam
-                    here = here * cp.asarray(np.exp(2j * math.pi * (turns % 1.0)).astype(np.complex64))
+                    turns = (cp.asarray((mx * jx) % size)[None, :] / size + cp.asarray((my * jy) % size)[:, None] / size
+                             + up * y + away / lam)
+                    here = here * cp.exp(2j * math.pi * (turns % 1.0)).astype(cp.complex64)
+                    del turns
                     spectrum = cufft.fft2(here, overwrite_x=True)
                     del here
                     slant = 1 - dx * dx - dy * dy
