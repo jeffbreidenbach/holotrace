@@ -78,3 +78,11 @@ Mitsuba itself runs on the GPU only on NVIDIA cards of compute
 capability 7.5 or newer (Turing onward); on older cards and other
 machines it runs on the CPU, more slowly. The GPU sum (CuPy) works on
 older cards too.
+
+[DESIGN.md](DESIGN.md) explains how it works, why, and what each
+optimization bought.
+
+## License
+
+GPL-2.0-only: see [LICENSE](LICENSE). The 3DBenchy model in
+`scenes/3dbenchy` is public domain (CC0); see its `SOURCE.md`.

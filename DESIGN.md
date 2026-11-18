@@ -26,8 +26,9 @@ can reach, with its true path length, and the plate records their sum.
 
 The latest result is a 4.1 cm plate (163,840² pixels 0.25 µm apart)
 holding a 27 mm boat whose light spreads ±35°, viewed by a simulated eye
-30 cm away. It takes about 40 min on one 8 GB GPU from 2016 with an NVMe
-disk.
+30 cm away. It takes about 30 min on one 8 GB graphics card from 2016
+with an NVMe disk, or about 1.5 hours with a checkered wall behind the
+boat that looks endless from every angle (§6.5).
 
 ## 2. Conventions
 
@@ -144,6 +145,7 @@ replaced, on a case small enough for both. In order:
 | Plane-to-plane sum, 4 cm | the in-memory carry's views | 0.07–0.09% |
 | Wide-plane carry with a cut-out plate (`planes._cut`) | direct NumPy FFTs, synthetic field | 0.09% (float32 at the cone's edge) |
 | Slabs summed before transforming back; zeros never written | the earlier plane-to-plane result, 2 cm and 4 cm | views 0.04–0.09%, unchanged |
+| Wide planes for only the groups that need them (§6.4, step 12) | every group on wide planes, 4 cm with the endless wall, spectrum | 0.65% overall; 0.03–0.13% under sine 0.55; 3.3% in the cone's last degree |
 | Real-eye view (`Look.eye_view`) | brute force (whole plane × sphere's phase, one filter), 4 mm plate | one cell: 0.4–1.2%, correlation 0.9999; 2–3 cells: 2–7%, correlation 0.997–0.999 |
 
 The recording planes themselves differ from a direct sum by 1.2–1.6% in
@@ -268,7 +270,8 @@ plate, and the cost doesn't grow with the plate (`viewer.Look.view`).
 ## 6. Scaling up: the optimization history
 
 Each step below solved the bottleneck the previous one exposed. Times
-are on an 8 GB GPU from 2016, about 32 GB of RAM, and a SATA SSD.
+are on an 8 GB graphics card from 2016, about 32 GB of RAM, and a SATA
+SSD, except where NVMe is named.
 
 ### 6.1 From 2 mm to 4 cm at ±7°
 
@@ -362,10 +365,10 @@ go through `planes.sum_by_groups`:
    **spectrum = Σ over groups of H(distance) · FFT(group plane)**.
 5. **Wrap-around.** The plate-wide transform is periodic. If all the
    scene's light lands on the plate, which the no-clipping size rule
-   (§6.3) guarantees, nothing wraps. Otherwise the planes are made wider
-   than the plate by as far as the light spreads. The spectrum is then
-   summed on that wider domain, transformed back, the plate cut out, and
-   transformed again (`_cut`).
+   (§6.3) guarantees, nothing wraps. Otherwise planes are made wider
+   than the plate, by enough that what comes back round falls short of
+   it. Their spectrum is summed on that wider domain, transformed back,
+   the plate cut out, and transformed again (`_cut`; see step 12).
 
 6. **Sum a tile's slabs before transforming back** (`planes._tile`). Each
    slab's light is summed straight into a patch with the group's deepest
@@ -398,6 +401,21 @@ go through `planes.sum_by_groups`:
     depth there is 300–400 µm, not thinner.
 11. **Brightness maps kept on disk** (`solid.seen_maps`): a rerun of the
     same scene skips Mitsuba (5 minutes, and its start-up hang).
+12. **Wide planes only where needed.** A wide plane costs its area: at
+    4 cm with the endless wall (§6.5) the planes are 114,688² against
+    the plate's 81,920², twice the work and about 90 GB of scratch each.
+    So each group's need is worked out on its own: how far its slabs'
+    light lands from the axis (their points' offset, plus the cone's
+    spread to the middle plane and from there to the plate), plus half
+    the plate. Groups that need more than the plate's width are summed
+    first, on planes of the widest need, into a scratch spectrum; the
+    plate is cut out of that into the result; the rest are then added at
+    the plate's own width. With the wall, one group of seven is wide.
+13. **The cut, a few rows at a time** (`planes._cut_rows`). Cutting the
+    plate out transforms the wide sum back along columns, block by
+    block, then along rows on the GPU 256 rows at a time (a whole band
+    of rows at that width does not fit an 8 GB card), keeps the plate's
+    part, and transforms it again at the plate's width.
 
 **Results.**
 
@@ -407,10 +425,17 @@ go through `planes.sum_by_groups`:
 | Plane to plane, SATA SSD | 105 min | ~1 h 50 min | ~4 GB |
 | + steps 6 and 7, on NVMe | 35 min (24 min making planes, 11 min carrying) | ~40 min | ~4 GB (RSS is higher: page cache) |
 | + steps 8 to 11 (faded, 300 µm slabs) | **24 min** (16.5 min making planes, 7.5 min carrying) | ~29 min, 24 min on a rerun | ~4 GB |
+| With the endless wall, every group on wide planes | 99 min + 8 min cut | ~2 h | |
+| With the endless wall, steps 12 and 13 | **87 min** (38 min the wall's plane, 4.5 min its carry, 16 min the cut, 28 min the boat's groups) | ~1.5 h on a rerun | |
 
 - **2 cm:** 878 s by GPU tiles; 1066 s plane to plane; 892 s with steps 6
   and 7 on SATA.
 - **Accuracy:** views agree with the old method to 0.04–0.09% throughout.
+- **A sharp cone on different grids.** Sums made on planes of different
+  widths place the cone's sharp cut slightly differently, and differ by
+  a few percent in its last degree (sine 0.565–0.574) and well under
+  0.5% inside sine 0.55. It is not wrap-around: the difference is not
+  gathered at the plate's edges.
 - **Where the time goes now:** no one thing. Of the 16.5 minutes making
   planes, roughly a third each is the point sum, the transforms, and
   writing the scratch planes (49 GB each); the rest is the carry, which
@@ -424,7 +449,9 @@ go through `planes.sum_by_groups`:
   depth squared. Depth is no longer limited by memory.
 
 **Disk needed:** the spectrum plus one scratch plane, 2 × (n² × 8 bytes), at
-the least; with more, more groups go in each pass.
+the least; with more, more groups go in each pass. Wide planes need
+more: the 4 cm plate with the endless wall takes about 200 GB while it
+is made.
 
 | Viewing cone | Kept pitch | Plate for 91 GB free | For ~160 GB | For ~670 GB |
 |---|---|---|---|---|
@@ -435,6 +462,28 @@ the least; with more, more groups go in each pass.
 The disk matters: moving from the SATA SSD to NVMe cut the 4 cm run by
 well over half. 10 cm at ±35° is estimated at 7–9 h on that GPU with
 enough NVMe, or 1–2 h on a rented 4090-class card (not run).
+
+### 6.5 The endless wall (`benchy --wall`)
+
+A checkered wall stands behind the boat, which hides part of it and
+casts a shadow on it. A wall the size of the plate shows its edges as
+soon as the eye moves off the axis, so the wall reaches past the plate
+as far as the light spreads on the way there:
+
+half its width = half the plate + cone · fade · depth + 2 · spacing.
+
+At 4 cm that is a wall 56.6 mm wide, 9.8 mm behind a 40.96 mm plate:
+3.1 million points on the wall beside the boat's 1.9 million, 4.4
+million of them seen at all.
+
+- **Checked by eye:** from 32° to the side the wall fills the view. From
+  33° toward a corner one corner is dark; that is the plate's own far
+  corner beyond the 35° cone, not the wall's edge.
+- **Maps in half precision from the start** (`solid.maps`): five million
+  32 × 32 maps are 10 GB as float16; as float32, with the copies made on
+  the way, they did not fit in memory.
+- **Its light lands beyond the plate,** which is what steps 12 and 13 of
+  §6.4 are for.
 
 ## 7. The viewer (`viewer.py`)
 
@@ -487,8 +536,14 @@ enough NVMe, or 1–2 h on a rented 4090-class card (not run).
 - **Movies.** `holotrace view NAME --eye 300 --focus 0 [--source 0.02]`
   sweeps the eye across and back, then up and back, as far as it can
   while still seeing the whole plate: 96 frames.
-  - Laser: about 6 s a frame at 4 cm.
-  - Lamp (111 replays): about 26 s a frame at 4 cm, 5 s at 2 cm.
+  - Laser: about 3 s a frame at 4 cm.
+  - Lamp (111 replays): about 10 s a frame at 4 cm.
+
+  Two changes made these two to three times faster. Spectrum patches
+  are copied from the blocked file a run of rows and columns at a time,
+  not picked out sample by sample (`Look._patch`, `_runs`), and the
+  sphere's phase for each cell is worked out on the GPU, still in double
+  precision.
 
   The movies in `out/` made before this change used the blended view,
   which understates laser speckle.
@@ -606,7 +661,7 @@ split is not measured.
 | `meshes.py` | STL reading and sampling surfaces into points. |
 | `solid.py` | Step 3 scene (ball and wall); `maps` (Mitsuba visibility and shading); `Optics` / `Optics.wide`; `sum_planes` (tile by tile, for plates that fit in memory); `_carry`; `render` (the whole pipeline). |
 | `planes.py` | Plane-to-plane sum for plates too big for memory (§6.4). |
-| `benchy.py` | The boat: `--scale`, `--spacing`, `--turn`, `--plate`, `--pixel`, `--cone`, `--slab`. |
+| `benchy.py` | The boat: `--scale`, `--spacing`, `--turn`, `--plate`, `--pixel`, `--cone`, `--slab`, `--wall`. |
 | `viewer.py` | `Look` (views from the spectrum), light sources (`LASER`, `LED`, `lamp`), movies, `compare`. |
 | `speckle.py` | Parked phase optimization against speckle (§8.1). |
 
@@ -621,12 +676,13 @@ separately). A non-default turn is added as `-turn15`.
 uv run --extra gpu holotrace benchy --plate 20.48 --scale 6 --spacing 12 --turn 15 --pixel 0.25 --cone 35 --slab 300
 #   2 cm plate, 1 cm boat: ~17 min, 13 GB spectrum (8 GB on disk)
 uv run --extra gpu holotrace benchy --plate 40.96 --scale 16 --spacing 32 --pixel 0.25 --cone 35 --slab 300
-#   4 cm plate, 27 mm boat: ~40 min on NVMe (set HOLOTRACE_OUT to a folder on it);
-#   the spectrum 33 GB on disk, and up to 54 GB of scratch while running
+#   4 cm plate, 27 mm boat: ~30 min on NVMe (set HOLOTRACE_OUT to a folder on it);
+#   the spectrum 33 GB on disk, and 50 to 200 GB of scratch while running
+#   add --wall for the endless wall: ~1.5 h, about 200 GB of disk while running
 uv run --extra gpu holotrace view benchy-40.96mm-32um-35deg-0.25um-boat16 --eye 300 --focus 0
-#   real-eye movie, laser: ~10 min
+#   real-eye movie, laser: ~5 min
 uv run --extra gpu holotrace view benchy-40.96mm-32um-35deg-0.25um-boat16 --eye 300 --focus 0 --source 0.02
-#   the same lit by a lamp 0.02 rad across: ~40 min
+#   the same lit by a lamp 0.02 rad across: ~17 min
 ```
 
 If a run prints nothing for more than a minute after starting, Mitsuba
