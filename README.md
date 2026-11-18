@@ -30,10 +30,15 @@ reference beam.
 A simulated eye, with a real pupil and focus, looks at the result to
 check it before anything is printed.
 
-## Physical Realization
+## Physical realization
 
-I'm looking for collaboration towards bringing these calculations out from
-the computer's imagination and into the physical world.
+So far these holograms exist only in the computer's imagination. I'm
+looking for collaborators to help bring them into the physical world.
+
+The hard part is the printing: the plate's pixels are 0.25 µm across,
+its fringes mostly about 1 µm apart, over an area centimetres wide. If
+you can write patterns that fine, or have an idea for doing it cheaply,
+please open an issue.
 
 ## Running
 
