@@ -7,6 +7,10 @@ Compute off-axis (Leith–Upatnieks) image plane holograms of ray-traced scenes.
 *A computed hologram 4 cm across (163,840² pixels, 0.25 µm apart), seen
 by a simulated eye 30 cm away, lit by a small lamp.*
 
+<img src="docs/fringes.png" width="600" alt="The hologram's fringes">
+
+*Its fringes: 300 × 300 pixels at the plate's middle, 75 µm across.*
+
 The aim is the best hologram a computer can make, the test being that
 optics in the scene still work. Look through a recorded magnifying glass,
 and what is behind it is magnified, sharp, and changes as you move.
