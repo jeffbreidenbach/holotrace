@@ -3,6 +3,11 @@
 Computed off-axis (Leith–Upatnieks) holograms of ray-traced scenes, with
 the subject on the image plane: on and around the plate.
 
+![A hologram of 3DBenchy in front of a checkered wall, seen by a simulated eye moving side to side, then up and down](docs/benchy.webp)
+
+*A computed hologram 4 cm across (163,840² pixels, 0.25 µm apart), seen
+by a simulated eye 30 cm away, lit by a small lamp.*
+
 The aim is the best hologram a computer can make, the test being that
 optics in the scene still work: look through a recorded magnifying glass,
 and what is behind it is magnified, sharp, and changes as you move.
