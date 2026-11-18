@@ -5,7 +5,7 @@ Compute off-axis (Leith–Upatnieks) image plane holograms of ray-traced scenes.
 ![A hologram of 3DBenchy in front of a checkered wall, seen by a simulated eye moving side to side, then up and down](docs/benchy.webp)
 
 *A computed hologram 4 cm across (163,840² pixels, 0.25 µm apart), seen
-by a simulated eye 30 cm away, lit by a small red LED.*
+by a simulated eye 30 cm away.*
 
 <img src="docs/fringes.png" width="560" alt="The hologram's fringes">
 
@@ -75,7 +75,7 @@ uv run --extra gpu holotrace benchy --plate 40.96 --scale 16 --spacing 32 --pixe
 #   that no edge of it is seen from anywhere: about 1.5 hours, and 200 GB of disk while it is made
 uv run --extra gpu holotrace view benchy --focus 0   # a movie: eye moving side to side, up and down
 uv run --extra gpu holotrace view NAME --eye 300     # ... seen by a real eye 30 cm away, 4 mm pupil
-uv run --extra gpu holotrace view NAME --eye 300 --source 0.02   # ... lit by a red LED 2 cm across, 1 m off: far less speckle
+uv run --extra gpu holotrace view NAME --eye 300 --source 0.02   # ... lit by a source 2 cm across, 1 m off: far less speckle
 uv run --extra gpu holotrace speckle    # step 4 (parked): phases optimized against speckle
 uv run --extra gpu holotrace gpucheck   # the GPU's sum against the CPU's
 ```
