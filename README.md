@@ -31,7 +31,7 @@ reference beam.
 3. **Output.** Add the reference beam, encode the fringes (binary or
    grayscale), and write tiles for the printer.
 
-A simulated eye, with a real pupil and focus, looks at the result to
+A simulated eye, with a pupil and focus, looks at the result to
 evaluate.
 
 ## Physical realization
