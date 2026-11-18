@@ -30,16 +30,10 @@ reference beam.
 A simulated eye, with a real pupil and focus, looks at the result to
 check it before anything is printed.
 
-## Plan
+## Physical Realization
 
-1. A tiny analytic test, no renderer: a fine pattern behind a lens, a
-   plate a few millimetres across, and the simulated eye. It passes if the
-   pattern looks magnified and sharp, and the magnification changes as the
-   eye moves.
-2. The same test with the scene traced by Mitsuba.
-3. Scale up: tiling, real meshes and materials from Blender, then a real
-   scene.
-4. Choose the output medium, which fixes the pixel pitch and encoding.
+I'm looking for collaboration towards bringing these calculations out from
+the computer's imagination and into the physical world.
 
 ## Running
 
