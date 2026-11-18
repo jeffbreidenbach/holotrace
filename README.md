@@ -45,7 +45,7 @@ please get in contact.
 
 ## Running
 
-```
+```bash
 uv run holotrace check        # Mitsuba works and can measure how far rays go
 uv run holotrace magnifier    # step 1: a hologram of a magnifying glass
 uv run holotrace mesh         # step 2: the lens as a mesh traced by Mitsuba
@@ -54,7 +54,7 @@ uv run holotrace mesh         # step 2: the lens as a mesh traced by Mitsuba
 Results go to `out/`. Add `--gpu` to `magnifier` or `mesh` to sum the
 light on an NVIDIA GPU with CuPy, many times faster:
 
-```
+```bash
 uv run --extra gpu holotrace mesh --gpu
 uv run --extra gpu holotrace solid      # step 3: a solid scene across the plate
 uv run --extra gpu holotrace benchy     # 3DBenchy, the 3D printing test boat
