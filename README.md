@@ -1,7 +1,6 @@
 # holotrace
 
-Computed off-axis (Leith–Upatnieks) holograms of ray-traced scenes, with
-the subject on the image plane: on and around the plate.
+Compute off-axis (Leith–Upatnieks) image plane holograms of ray-traced scenes.
 
 ![A hologram of 3DBenchy in front of a checkered wall, seen by a simulated eye moving side to side, then up and down](docs/benchy.webp)
 
