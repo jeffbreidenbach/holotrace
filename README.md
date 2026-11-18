@@ -29,7 +29,7 @@ reference beam.
 2. **Coherent sum.** For each tile of the plate, add up every point's
    wave: brightness × visibility × e^(ik·path length) / distance.
 3. **Output.** Add the reference beam, encode the fringes (binary or
-   grayscale), and write tiles for the printer.
+   grayscale), and write tiles for printing.
 
 A simulated eye, with a pupil and focus, looks at the result to
 evaluate.
