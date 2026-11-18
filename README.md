@@ -32,7 +32,7 @@ reference beam.
    grayscale), and write tiles for the printer.
 
 A simulated eye, with a real pupil and focus, looks at the result to
-check it before anything is printed.
+evaluate.
 
 ## Physical realization
 
