@@ -8,7 +8,7 @@ Compute off-axis (Leith–Upatnieks) image plane holograms of ray-traced scenes.
 by a simulated eye 30 cm away, lit by a small lamp.*
 
 The aim is the best hologram a computer can make, the test being that
-optics in the scene still work: look through a recorded magnifying glass,
+optics in the scene still work. Look through a recorded magnifying glass,
 and what is behind it is magnified, sharp, and changes as you move.
 
 ## How it works
