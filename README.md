@@ -7,7 +7,7 @@ Compute off-axis (Leith–Upatnieks) image plane holograms of ray-traced scenes.
 *A computed hologram 4 cm across (163,840² pixels, 0.25 µm apart), seen
 by a simulated eye 30 cm away, lit by a small lamp.*
 
-<img src="docs/fringes.png" width="600" alt="The hologram's fringes">
+<img src="docs/fringes.png" width="560" alt="The hologram's fringes">
 
 *Its fringes: 300 × 300 pixels at the plate's middle, 75 µm across.*
 
