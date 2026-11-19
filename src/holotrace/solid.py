@@ -239,10 +239,6 @@ def maps(world, points, normals, albedo, gloss, chunk=4000, shadows=True, traced
             origins = np.repeat(p[idx] + lift * n[idx], len(rays), axis=0)
             clear = ~_blocked(world, origins, np.tile(rays, (len(idx), 1)))
             lit[idx] = clear.reshape(len(idx), len(rays)).mean(axis=1)
-        if traced is None:
-            diffuse = a * (AMBIENT + (1 - AMBIENT) * np.maximum(n @ LIGHT, 0) * lit)
-        else:
-            diffuse = a * _falling(traced, p, n, seed=s // chunk)
 
         # Every point with every direction: what belongs to a point
         # repeated for each direction, and to a direction for each point.
@@ -258,6 +254,15 @@ def maps(world, points, normals, albedo, gloss, chunk=4000, shadows=True, traced
         facing = dr.dot(normal, toward)
         origin = mi.Point3f(*(each(c) for c in (p + lift * n).T))
         seen = (facing > 0) & ~world.ray_test(mi.Ray3f(o=origin, d=toward), active=facing > 0)
+        if traced is None:
+            diffuse = a * (AMBIENT + (1 - AMBIENT) * np.maximum(n @ LIGHT, 0) * lit)
+        else:
+            # Only for the points seen from somewhere: with a narrow
+            # cone, most of a solid's are not.
+            some = np.array(seen).reshape(len(p), m * m).any(axis=1)
+            diffuse = np.zeros(len(p))
+            if some.any():
+                diffuse[some] = a[some] * _falling(traced, p[some], n[some], seed=s // chunk)
         shine = dr.maximum(dr.dot(normal, mi.Vector3f(*(every(c) for c in half.T))), 0)
         power = (each(diffuse) + each(g * lit) * dr.power(shine, SHINE)) * facing
         out[s : s + chunk] = np.array(dr.select(seen, dr.sqrt(power), 0)).reshape(len(p), m * m)

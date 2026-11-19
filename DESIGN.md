@@ -26,9 +26,12 @@ can reach, with its true path length, and the plate records their sum.
 
 The latest result is a 4.1 cm plate (163,840² pixels 0.25 µm apart)
 holding a 27 mm boat whose light spreads ±35°, viewed by a simulated eye
-30 cm away. It takes 11 min on one 8 GB graphics card from 2016 with an
-NVMe disk, or 45 min with a checkered wall behind the boat that looks
-endless from every angle (§6.5).
+30 cm away. With its light by rule it takes 11 min on one 8 GB graphics
+card from 2016 with an NVMe disk; path traced, as it is unless asked
+otherwise (§3.1), about a minute more, going by the 2 cm boat, which
+has as many points (not timed as a whole). With a
+checkered wall behind the boat that looks endless from every angle
+(§6.5) it takes 46 min, path traced.
 
 ## 2. Conventions
 
@@ -114,14 +117,15 @@ now take 1.9 s; the 2 cm boat's 1.9 million took 150–174 s, and now
 take 32 s. The maps agree to 6 × 10⁻⁶ (one direction in 52 million is
 lit in one and not the other).
 
-**The matte light path traced, if asked** (`benchy --traced`). By
-default the matte part of a point's brightness is a rule: the lamp's
-light by how squarely it falls, times how much of the lamp the point
-sees, plus the same ambient light everywhere. With `--traced` it is the
-light falling on the point as Mitsuba's path tracer finds it
-(`solid._falling`): the lamp's with shadows as soft as its disc is
-wide, the sky's as far as the point can see the sky, and what other
-surfaces send on, after as many as four bounces.
+**The matte light, path traced.** The matte part of the boat's
+brightness is the light falling on each point as Mitsuba's path tracer
+finds it (`solid._falling`): the lamp's with shadows as soft as its
+disc is wide, the sky's as far as the point can see the sky, and what
+other surfaces send on, after as many as four bounces. At first it was
+a rule, and with `benchy --rule` it still is: the lamp's light by how
+squarely it falls, times how much of the lamp the point sees, plus the
+same ambient light everywhere. The rule is quicker (see the cost,
+below); step 3's scene (`holotrace solid`) still uses it.
 
 - **The scene** (`solid.lit`): the lamp is a disc 0.05 rad across far
   off toward `LIGHT`, and the sky is the same all round. They are as
@@ -143,11 +147,22 @@ surfaces send on, after as many as four bounces.
   contrast under a 0.02 rad lamp was 0.270 by rule and 0.258 traced
   (§8.4's measure); on the 4 cm boat and its wall (§6.4), 0.297 and
   0.296.
-- **Cost:** about 47 µs a point more in the maps step. The 2 cm boat's
-  1.9 million points take 120 s instead of 30 s; the 4 mm boat's
-  170,000 take 11 s instead of 3 s. The 4 cm boat and wall's 5.0
-  million take 240 s instead of 78 s, of a run of 46 minutes. The sum
-  is not touched.
+- **Cost:** about 47 µs for each point traced, in the maps step. The
+  sum is not touched. With every point traced, as at first, the 2 cm
+  boat's 1.9 million points took 120 s instead of 30 s by rule; the
+  4 mm boat's 170,000 took 11 s instead of 3 s; the 4 cm boat and
+  wall's 5.0 million took 240 s instead of 78 s, of a run of 46
+  minutes.
+- **Only the points seen from somewhere are traced.** The rest send
+  the plate nothing, whatever falls on them. Within ±35° two thirds of
+  the boat's points are seen, and 87% of the boat and wall's; within
+  ±7°, 42% of the boat's. The 2 cm plate at ±7° (739,000 points) takes
+  38 s in all: it took 66 s with every point traced, and 29 s by rule.
+  The 4 cm plate at ±7° (1.9 million) takes 113 s: 196 s, and 81 s by
+  rule. The 2 cm boat at ±35° takes 3.9 min, its maps 85 s of that; by
+  rule, 3.0 min. The maps are the same but for the path tracer's
+  noise: on a 4 mm boat the same points and directions are seen, and
+  the seen points' light is the same on average to 0.04%.
 - **What it changes** in this scene is modest: corners and the shadowed
   side get the light they would, not a fixed share, and the views are 4
   to 6% brighter from light bounced between surfaces. On the 4 cm boat
@@ -185,6 +200,10 @@ hang at start now and then, with no output and one core busy.
   told there is no CUDA library to look for (`DRJIT_LIBCUDA_PATH`),
   before Mitsuba is imported. It prints one line, "Unable to load", and
   goes on. 0 of 40 starts hung, with a Dr.Jit call straight after.
+- **Dr.Jit's own cure** is in its main branch since 20 August 2026
+  (its issue 524, the same two locks): what it has to say is kept
+  until its lock is let go. No release has it yet: 1.5.0, of 7 August,
+  is the newest and the one used here. Not tried here.
 - **Mitsuba must be had from `mesh._mitsuba()`,** not imported first, or
   the setting comes too late.
 - A rerun of a scene whose maps are kept does not load Mitsuba at all.
@@ -423,6 +442,7 @@ SSD, except where NVMe is named.
 | 4 cm, 81920² | keep only the cone's light, every 2 µm | 19 min, 16 GB |
 | 4 cm | deep slabs summed and carried at the kept 2 µm; 8192 tiles; boat without its wall | 68 s (from 987 s); 2.6 min total |
 | 4 cm | a thread per pixel in the point sum, and the maps shaded on Mitsuba's arrays (§3) | 21 s; 81 s total, 37 s of it spreading the points evenly |
+| 4 cm | the light path traced, for the points that are seen (§3.1) | 23 s; 113 s total, 44 s of it the maps |
 
 ### 6.2 Wide viewing angle: ±35° at 0.25 µm
 
@@ -541,7 +561,8 @@ go through `planes.sum_by_groups`:
     depth there is 300–400 µm, not thinner.
 11. **Brightness maps kept on disk** (`solid.seen_maps`): a rerun of the
     same scene skips Mitsuba (then 5 minutes, and its start-up hang;
-    now half a minute, and no hang: §3.1).
+    now half a minute by rule, a minute and a half path traced, and
+    no hang: §3.1).
 12. **Wide planes only where needed.** A wide plane costs its area: at
     4 cm with the endless wall (§6.5) the planes are 114,688² against
     the plate's 81,920², twice the work and about 90 GB of scratch each.
@@ -591,6 +612,11 @@ go through `planes.sum_by_groups`:
 | With the endless wall, every group on wide planes | 99 min + 8 min cut | ~2 h | |
 | With the endless wall, steps 12 and 13 | 87 min (38 min the wall's plane, 4.5 min its carry, 16 min the cut, 28 min the boat's groups) | ~1.5 h on a rerun | |
 | With the endless wall, steps 14 to 17 | **43 min** (9.5 min the wall's plane, 4 min its carry, 15 min the cut, 14 min the boat's groups) | **45 min** | |
+| The same, its light path traced (§3.1) | 41 min (9.4 min the wall's plane, 4 min its carry, 15 min the cut, 13 min the boat's groups) | **46 min** | |
+
+- **All but the last row were timed with the light by rule** (now
+  `--rule`). Path traced, only the maps take longer (§3.1): in the last
+  row 4.0 min, not 1.3, with every one of its points traced.
 
 - **The 20.9 min run carried in three passes,** not two: 229 GB of disk
   was free, room for three 49 GB planes at a time. Making the planes
@@ -598,7 +624,8 @@ go through `planes.sum_by_groups`:
 - **2 cm:** 878 s by GPU tiles; 1066 s plane to plane; 892 s with steps 6
   and 7 on SATA. On NVMe: 540 s with steps 8 to 13, 138 s with step 14,
   113 s with steps 16 and 17 (131 s on SATA). The whole run from
-  scratch takes 3.0 min on NVMe and 3.3 min on SATA.
+  scratch takes 3.0 min on NVMe and 3.3 min on SATA, by rule; path
+  traced, 3.9 min on NVMe.
 - **Accuracy:** views agree with the old method to 0.04–0.09% throughout.
 - **Steps 16 and 17 against the run before them** (4 cm spectrum, same
   points): 2 × 10⁻⁴ inside sine 0.55, which is half precision's (a
@@ -876,8 +903,8 @@ both, from two eye positions 30 cm away:
   (clear where cos θ > sqrt(1 − a²)) that can be reused.
 - **Speckle** in laser light (§8). The lamp reduces it in viewing only.
 - **Simple materials:** a single white plastic: matte, a little ambient,
-  one glossy highlight, one disc light. With `--traced` the matte light
-  is path traced (§3.1); the materials are no richer.
+  one glossy highlight, one disc light. The boat's matte light is path
+  traced (§3.1), but the materials are no richer for it.
 - **32 × 32 directions per point** (about 2.2° apart at ±35°): highlights
   and occlusion edges are blended between those directions.
 - **Occlusion edges are soft, and finer maps alone would not sharpen
@@ -910,7 +937,7 @@ both, from two eye positions 30 cm away:
 | `meshes.py` | STL reading and sampling surfaces into evenly spread points. |
 | `solid.py` | Step 3 scene (ball and wall); `maps` (Mitsuba visibility and shading; `lit` and `_falling` for path-traced light); `Optics` / `Optics.wide`; `sum_planes` (tile by tile, for plates that fit in memory); `_carry`; `render` (the whole pipeline). |
 | `planes.py` | Plane-to-plane sum for plates too big for memory (§6.4). |
-| `benchy.py` | The boat: `--scale`, `--spacing`, `--turn`, `--plate`, `--pixel`, `--cone`, `--slab`, `--wall`, `--traced`. |
+| `benchy.py` | The boat: `--scale`, `--spacing`, `--turn`, `--plate`, `--pixel`, `--cone`, `--slab`, `--wall`, `--rule`. |
 | `viewer.py` | `Look` (views from the spectrum), light sources (`LASER`, `LED`, `lamp`), movies, `compare`. |
 | `speckle.py` | Parked phase optimization against speckle (§8.1). |
 
@@ -918,17 +945,19 @@ Output names encode the settings, for example
 `out/benchy-40.96mm-32um-35deg-0.25um-boat16`: plate width, point
 spacing, cone, pixel, and boat scale (when the plate width is given
 separately). A non-default turn is added as `-turn15`, the wall as
-`-wall`, and path-traced light as `-traced`.
+`-wall`, and light by rule as `-rule`.
 
 ## 11. Reproducing the main results
 
 ```
 uv run --extra gpu holotrace benchy --plate 20.48 --scale 6 --spacing 12 --turn 15 --pixel 0.25 --cone 35 --slab 300
-#   2 cm plate, 1 cm boat: 3 min, 13 GB spectrum (8 GB on disk)
+#   2 cm plate, 1 cm boat: 4 min (3 by rule), 13 GB spectrum (8 GB on disk)
 uv run --extra gpu holotrace benchy --plate 40.96 --scale 16 --spacing 32 --pixel 0.25 --cone 35 --slab 300
-#   4 cm plate, 27 mm boat: 11 min on NVMe (set HOLOTRACE_OUT to a folder on it);
+#   4 cm plate, 27 mm boat: 11 min by rule on NVMe (set HOLOTRACE_OUT to a folder on it);
 #   the spectrum 33 GB on disk, and up to 66 GB of scratch while running
-#   add --wall for the endless wall: 45 min, up to 174 GB of disk while running
+#   add --wall for the endless wall: 46 min, up to 174 GB of disk while running
+#   add --rule for the light by rule, not path traced (§3.1): quicker, and how the
+#   11 min above was measured
 uv run --extra gpu holotrace view benchy-40.96mm-32um-35deg-0.25um-boat16 --eye 300 --focus 0
 #   real-eye movie, laser: ~5 min
 uv run --extra gpu holotrace view benchy-40.96mm-32um-35deg-0.25um-boat16 --eye 300 --focus 0 --source 0.02
@@ -955,9 +984,9 @@ In the order recommended:
    size and levels fix the optics.
 3. **Go bigger** (§6.4). It needs only disk: 10 cm at ±35° needs about
    500 GB. Not run, and not timed.
-4. **Richer scenes.** `--traced` (§3.1) has Mitsuba's path tracer work
-   out the light falling on each point; the scene it lights is still
-   one matte boat, a matte wall, one lamp and an even sky. Mitsuba will
+4. **Richer scenes.** Mitsuba's path tracer works out the light
+   falling on each point (§3.1); the scene it lights is still one
+   matte boat, a matte wall, one lamp and an even sky. Mitsuba will
    take textures, several materials, and lamps and skies of any shape,
    and a scene could be built in Blender and exported to it. Each
    point's reflectance could then come from Mitsuba too

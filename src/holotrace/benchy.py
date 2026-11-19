@@ -2,7 +2,7 @@
 
     holotrace benchy [--scale S] [--spacing D] [--turn A]
                      [--pixel P --cone C [--slab T]] [--plate W] [--wall]
-                     [--traced]
+                     [--rule]
 
 makes it S times as big (default 1), on a plate S times as wide, with
 its surface sampled into points D um apart (default solid.SPACING),
@@ -17,10 +17,12 @@ with --wall: a dim checkered wall just behind the stern, which the boat
 hides in part and casts its shadow on. It reaches past the plate as far
 as the light spreads on the way there, so that no edge of it is seen from
 anywhere: it looks endless. (The planes are then wider than the plate:
-see planes.py.) With --traced (-traced in the name), the light falling
-on each point is worked out by Mitsuba's path tracer, not by rule: soft
-shadows, corners darker than the open, and light off the wall and the
-boat's own surfaces (see solid.maps).
+see planes.py.) The light falling on each point is worked out by
+Mitsuba's path tracer: soft shadows, corners darker than the open, and
+light off the wall and the boat's own surfaces (see solid.maps). With
+--rule (-rule in the name) it is by rule instead, which is quicker: the
+lamp's light by how squarely it falls and how much of the lamp the point
+sees, and the same ambient light everywhere.
 
 The boat (scenes/3dbenchy, public domain since 2025), scaled to about
 1.7 mm long, stands upright, turned 30 degrees to show its bow, its
@@ -142,8 +144,8 @@ def main():
         focus["on the wall"] = depth
         name += "-wall"
         print(f"a wall {2 * half / 1000:.1f} mm wide, {depth / 1000:.1f} mm behind the plate", flush=True)
-    traced = None
-    if "--traced" in sys.argv:
-        traced = lambda: world(triangles, wall, lit=True)
-        name += "-traced"
+    traced = lambda: world(triangles, wall, lit=True)
+    if "--rule" in sys.argv:
+        traced = None
+        name += "-rule"
     solid.render(name, parts, lambda: world(triangles, wall), focus, plate_size=size, traced=traced)

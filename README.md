@@ -59,22 +59,22 @@ uv run --extra gpu holotrace mesh --gpu
 uv run --extra gpu holotrace solid      # step 3: a solid scene across the plate
 uv run --extra gpu holotrace benchy     # 3DBenchy, the 3D printing test boat
 uv run --extra gpu holotrace benchy --scale 5 --spacing 16   # a 1 cm plate, tiled, with recording planes
-uv run --extra gpu holotrace benchy --scale 10 --spacing 32  # a 2 cm plate: half a minute on an 8 GB GPU from 2016
-uv run --extra gpu holotrace benchy --scale 20 --spacing 40  # a 4 cm plate: about 1.5 min, 7 GB of memory
+uv run --extra gpu holotrace benchy --scale 10 --spacing 32  # a 2 cm plate: 40 s on an 8 GB GPU from 2016
+uv run --extra gpu holotrace benchy --scale 20 --spacing 40  # a 4 cm plate: about 2 min, 7 GB of memory
 # Wide plates: 0.25 um pixels, the scene's light within 35 degrees either way.
 uv run --extra gpu holotrace benchy --plate 20.48 --scale 6 --spacing 12 --turn 15 --pixel 0.25 --cone 35 --slab 300
-#   a 2 cm plate, the boat 1 cm long: about 3 min, the spectrum 13 GB on disk
+#   a 2 cm plate, the boat 1 cm long: about 4 min, the spectrum 13 GB on disk
 # Plates too big for memory are summed plane to plane (see planes.py): groups of
 # slabs carried a short way, then each group's plane to the plate in one go.
 # HOLOTRACE_OUT=/path/on/a/fast/disk puts results there instead of out/: with it
-# on an NVMe drive the 4 cm plate below takes 11 min.
+# on an NVMe drive the 4 cm plate below takes 11 min with --rule.
 # Each scene's brightness maps are kept beside its results, so a rerun skips Mitsuba.
 uv run --extra gpu holotrace benchy --plate 40.96 --scale 16 --spacing 32 --pixel 0.25 --cone 35 --slab 300
 #   a 4 cm plate, the boat 2.7 cm long: the spectrum 33 GB on disk, and up to 66 GB more while it is made
 #   add --wall for a checkered wall behind the boat, which it hides in part and shadows, wide enough
-#   that no edge of it is seen from anywhere: 45 min, and up to 174 GB of disk while it is made
-#   add --traced to have Mitsuba's path tracer work out the light falling on each point: softer
-#   shadows, darker corners, and light bounced between surfaces, for a minute or two more
+#   that no edge of it is seen from anywhere: 46 min, and up to 174 GB of disk while it is made
+#   The light falling on each point is worked out by Mitsuba's path tracer: soft shadows, darker
+#   corners, and light bounced between surfaces. Add --rule for a simple rule instead, which is quicker.
 uv run --extra gpu holotrace view benchy --focus 0   # a movie: eye moving side to side, up and down
 uv run --extra gpu holotrace view NAME --eye 300     # ... seen by a real eye 30 cm away, 4 mm pupil
 uv run --extra gpu holotrace view NAME --eye 300 --source 0.02   # ... lit by a source 2 cm across, 1 m off: far less speckle
