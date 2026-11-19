@@ -73,6 +73,8 @@ uv run --extra gpu holotrace benchy --plate 40.96 --scale 16 --spacing 32 --pixe
 #   a 4 cm plate, the boat 2.7 cm long: the spectrum 33 GB on disk, and up to 66 GB more while it is made
 #   add --wall for a checkered wall behind the boat, which it hides in part and shadows, wide enough
 #   that no edge of it is seen from anywhere: 45 min, and up to 174 GB of disk while it is made
+#   add --traced to have Mitsuba's path tracer work out the light falling on each point: softer
+#   shadows, darker corners, and light bounced between surfaces, for a minute or two more
 uv run --extra gpu holotrace view benchy --focus 0   # a movie: eye moving side to side, up and down
 uv run --extra gpu holotrace view NAME --eye 300     # ... seen by a real eye 30 cm away, 4 mm pupil
 uv run --extra gpu holotrace view NAME --eye 300 --source 0.02   # ... lit by a source 2 cm across, 1 m off: far less speckle

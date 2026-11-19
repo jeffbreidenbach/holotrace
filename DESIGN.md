@@ -114,6 +114,47 @@ now take 1.9 s; the 2 cm boat's 1.9 million took 150–174 s, and now
 take 32 s. The maps agree to 6 × 10⁻⁶ (one direction in 52 million is
 lit in one and not the other).
 
+**The matte light path traced, if asked** (`benchy --traced`). By
+default the matte part of a point's brightness is a rule: the lamp's
+light by how squarely it falls, times how much of the lamp the point
+sees, plus the same ambient light everywhere. With `--traced` it is the
+light falling on the point as Mitsuba's path tracer finds it
+(`solid._falling`): the lamp's with shadows as soft as its disc is
+wide, the sky's as far as the point can see the sky, and what other
+surfaces send on, after as many as four bounces.
+
+- **The scene** (`solid.lit`): the lamp is a disc 0.05 rad across far
+  off toward `LIGHT`, and the sky is the same all round. They are as
+  bright as make the two ways agree in the open: a surface squarely
+  facing the lamp gets 1 − `AMBIENT` from it and `AMBIENT` from the
+  sky. The boat is matte with its own reflectance, 0.85; the wall is
+  matte with the mean of its squares', 0.2.
+- **How.** Each point is looked at from 1 µm above, straight down, 256
+  times over. What a matte surface sends back is the light falling on
+  it times its reflectance / π, so dividing gives the light. Looking at
+  the point leaves it to the path tracer to aim at the small lamp.
+- **Checked** on a flat sheet alone, where the answer is known (the
+  lamp's light by its tilt, and the whole sky's): tilted 0°, 30° and
+  60°, the light came to 0.7585, 0.4488 and 0.1501, and should be
+  0.7582, 0.4486 and 0.1500.
+- **Noise.** One point's light differs between runs by 5% where the
+  lamp reaches it, and 1% where only the sky does. It adds no grain
+  that can be measured: on the 2 cm boat with points 32 µm apart, the
+  contrast under a 0.02 rad lamp was 0.270 by rule and 0.258 traced
+  (§8.4's measure).
+- **Cost:** about 47 µs a point more in the maps step. The 2 cm boat's
+  1.9 million points take 120 s instead of 30 s; the 4 mm boat's
+  170,000 take 11 s instead of 3 s. The sum is not touched.
+- **What it changes** in this scene is modest: corners and the shadowed
+  side get the light they would, not a fixed share, and the views are 4
+  to 6% brighter from light bounced between surfaces.
+- **What is still by rule:** the highlight, and so anything whose
+  brightness changes with the direction it is seen from. Tracing that
+  would take paths for each of a point's 1,024 directions, not one set
+  for the point: one direction's light at 8 paths was 29% off, and the
+  boat traces at 5.2 million paths a second, which makes hours for the
+  4 cm boat. Not run.
+
 Mitsuba runs on the CPU (LLVM variant): its GPU variants need compute
 capability 7.5 or newer, so they are only tried when `nvidia-smi`
 reports a new enough card.
@@ -824,7 +865,8 @@ both, from two eye positions 30 cm away:
   (clear where cos θ > sqrt(1 − a²)) that can be reused.
 - **Speckle** in laser light (§8). The lamp reduces it in viewing only.
 - **Simple materials:** a single white plastic: matte, a little ambient,
-  one glossy highlight, one disc light.
+  one glossy highlight, one disc light. With `--traced` the matte light
+  is path traced (§3.1); the materials are no richer.
 - **32 × 32 directions per point** (about 2.2° apart at ±35°): highlights
   and occlusion edges are blended between those directions.
 - **Occlusion edges are soft, and finer maps alone would not sharpen
@@ -855,16 +897,17 @@ both, from two eye positions 30 cm away:
 | `gpu.py` | CUDA kernels via CuPy: `direct`, `through_lens` (Hermite-blended path lengths), `seen` / `seen_gather` and their reverse kernels; `GpuPlate`, `SeenPoints`. |
 | `gpucheck.py` | GPU against CPU. |
 | `meshes.py` | STL reading and sampling surfaces into evenly spread points. |
-| `solid.py` | Step 3 scene (ball and wall); `maps` (Mitsuba visibility and shading); `Optics` / `Optics.wide`; `sum_planes` (tile by tile, for plates that fit in memory); `_carry`; `render` (the whole pipeline). |
+| `solid.py` | Step 3 scene (ball and wall); `maps` (Mitsuba visibility and shading; `lit` and `_falling` for path-traced light); `Optics` / `Optics.wide`; `sum_planes` (tile by tile, for plates that fit in memory); `_carry`; `render` (the whole pipeline). |
 | `planes.py` | Plane-to-plane sum for plates too big for memory (§6.4). |
-| `benchy.py` | The boat: `--scale`, `--spacing`, `--turn`, `--plate`, `--pixel`, `--cone`, `--slab`, `--wall`. |
+| `benchy.py` | The boat: `--scale`, `--spacing`, `--turn`, `--plate`, `--pixel`, `--cone`, `--slab`, `--wall`, `--traced`. |
 | `viewer.py` | `Look` (views from the spectrum), light sources (`LASER`, `LED`, `lamp`), movies, `compare`. |
 | `speckle.py` | Parked phase optimization against speckle (§8.1). |
 
 Output names encode the settings, for example
 `out/benchy-40.96mm-32um-35deg-0.25um-boat16`: plate width, point
 spacing, cone, pixel, and boat scale (when the plate width is given
-separately). A non-default turn is added as `-turn15`.
+separately). A non-default turn is added as `-turn15`, the wall as
+`-wall`, and path-traced light as `-traced`.
 
 ## 11. Reproducing the main results
 
@@ -901,13 +944,14 @@ In the order recommended:
    size and levels fix the optics.
 3. **Go bigger** (§6.4). It needs only disk: 10 cm at ±35° needs about
    500 GB. Not run, and not timed.
-4. **Richer light.** Mitsuba is used only to ask whether a ray is
-   blocked; the shading is `solid.maps`' own: matte, ambient, one
-   highlight, one light. Mitsuba's path tracer can be asked for the
-   light along any batch of rays (`integrator.sample`), bounces and all:
-   512,000 (point, direction) pairs at 32 paths each took 1.3 s here.
-   That would give area and sky light, light bounced between surfaces,
-   textures, and any of its materials, with no change to the sum.
+4. **Richer scenes.** `--traced` (§3.1) has Mitsuba's path tracer work
+   out the light falling on each point; the scene it lights is still
+   one matte boat, a matte wall, one lamp and an even sky. Mitsuba will
+   take textures, several materials, and lamps and skies of any shape,
+   and a scene could be built in Blender and exported to it. Each
+   point's reflectance could then come from Mitsuba too
+   (`eval_diffuse_reflectance`, already used in `solid._falling`). Shiny
+   materials are another matter: see §3.1 and §9.
 5. **The endless wall without wide planes.** Leave out, in the point
    sum, each ray that would land beyond the plate, and make the planes
    periodic at the plate's own width: no wide planes, no cut. Tried on

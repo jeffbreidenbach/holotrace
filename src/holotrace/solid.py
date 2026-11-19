@@ -48,6 +48,11 @@ AMBIENT, GLOSS, SHINE = 0.15, 0.6, 40
 # say how much of it each point sees.
 LIGHT_SIZE = 0.05
 SHADOW_RAYS = 16
+# With the light path traced (see maps and lit), each point's is the
+# average of this many paths, each followed until it is this many
+# segments long: from the eye to the point, on to the light or another
+# surface, and so on.
+PATHS, DEPTH = 256, 6
 
 VIEWS = {"straight on": (0.0, 0.0), "from the right": (0.06, 0.0)}
 FOCUS = {"on the ball's front": -150.0, "on the wall": -WALL_Z}
@@ -122,6 +127,56 @@ def _blocked(world, origins, directions):
     return np.array(world.ray_test(ray))
 
 
+def lit(shapes):
+    """A scene of `shapes` (as Mitsuba's load_dict takes them, each with
+    its material) under the light the maps assume, for Mitsuba's path
+    tracer (see maps): the lamp, a disc LIGHT_SIZE across far off toward
+    LIGHT, as bright as gives a surface squarely facing it 1 - AMBIENT;
+    and a sky, the same all round, from which a surface in the open gets
+    AMBIENT."""
+    from .mesh import _mitsuba
+
+    mi = _mitsuba()
+    far = 1e7
+    lamp = mi.ScalarTransform4f().look_at(origin=(far * LIGHT).tolist(), target=[0, 0, 0], up=[0, 1, 0])
+    return mi.load_dict(
+        {
+            "type": "scene",
+            "integrator": {"type": "path", "max_depth": DEPTH},
+            "lamp": {
+                "type": "disk",
+                "to_world": lamp.scale(far * LIGHT_SIZE / 2),
+                "emitter": {"type": "area", "radiance": (1 - AMBIENT) / (math.pi * (LIGHT_SIZE / 2) ** 2)},
+            },
+            "sky": {"type": "constant", "radiance": AMBIENT / math.pi},
+            **shapes,
+        }
+    )
+
+
+def _falling(scene, points, normals, seed):
+    """The light falling on each point, by Mitsuba's path tracer in the
+    scene `scene` (see lit): the lamp's and the sky's, as much of each
+    as the point sees, and what other surfaces send on to it. Each point
+    is looked at from just above, straight down, PATHS times over: what
+    a matte surface sends back is the light falling on it times its
+    reflectance / pi. (Looking at it, rather than out from it, leaves it
+    to the path tracer to aim at the lamp, small as it is.)"""
+    import drjit as dr
+    import mitsuba as mi
+
+    def down(times):
+        each = lambda c: dr.repeat(mi.Float(np.ascontiguousarray(c, np.float32)), times)
+        return mi.Ray3f(o=mi.Point3f(*(each(c) for c in (points + normals).T)), d=mi.Vector3f(*(each(c) for c in -normals.T)))
+
+    met = scene.ray_intersect(down(1))
+    matte = np.array(met.bsdf().eval_diffuse_reflectance(met)).reshape(-1)
+    sampler = mi.load_dict({"type": "independent"})
+    sampler.seed(seed, len(points) * PATHS)
+    back = np.array(scene.integrator().sample(scene, sampler, down(PATHS))[0]).reshape(len(points), PATHS).mean(axis=1)
+    return np.where(matte > 0, math.pi * back / np.maximum(matte, 1e-9), 0)
+
+
 def _light_rays():
     """Directions to SHADOW_RAYS points spread evenly over the light's disc
     (a sunflower pattern), LIGHT_SIZE across about LIGHT."""
@@ -135,7 +190,7 @@ def _light_rays():
     return rays / np.linalg.norm(rays, axis=1, keepdims=True)
 
 
-def maps(world, points, normals, albedo, gloss, chunk=4000, shadows=True):
+def maps(world, points, normals, albedo, gloss, chunk=4000, shadows=True, traced=None):
     """Each point's light, as bright in each of the optics' directions x
     directions directions toward the viewer (tangents across its cone;
     rows along y): the
@@ -145,6 +200,12 @@ def maps(world, points, normals, albedo, gloss, chunk=4000, shadows=True):
     light; a little ambient light everywhere; and a highlight where
     glossy) times how much of it faces that way, or nothing where it
     faces away or something is in front of it.
+
+    With `traced` (the scene with its materials, lit: see lit), the
+    matte part is Mitsuba's path tracer's instead (_falling): shadows as
+    soft as the lamp is wide, less of the sky's light in corners than in
+    the open, and light the surfaces send each other. The highlight is
+    as before.
 
     A chunk of points at a time, each with every direction: a million
     rays or more a chunk, so the shading is worked out where the rays
@@ -178,7 +239,10 @@ def maps(world, points, normals, albedo, gloss, chunk=4000, shadows=True):
             origins = np.repeat(p[idx] + lift * n[idx], len(rays), axis=0)
             clear = ~_blocked(world, origins, np.tile(rays, (len(idx), 1)))
             lit[idx] = clear.reshape(len(idx), len(rays)).mean(axis=1)
-        diffuse = a * (AMBIENT + (1 - AMBIENT) * np.maximum(n @ LIGHT, 0) * lit)
+        if traced is None:
+            diffuse = a * (AMBIENT + (1 - AMBIENT) * np.maximum(n @ LIGHT, 0) * lit)
+        else:
+            diffuse = a * _falling(traced, p, n, seed=s // chunk)
 
         # Every point with every direction: what belongs to a point
         # repeated for each direction, and to a direction for each point.
@@ -468,7 +532,7 @@ def results():
     return Path(os.environ.get("HOLOTRACE_OUT", "out"))
 
 
-def seen_maps(path, world, points, normals, albedo, gloss, shadows=True):
+def seen_maps(path, world, points, normals, albedo, gloss, shadows=True, traced=None):
     """Which of the points are seen at all, and those points' brightness
     maps (see maps), in half precision (plenty for brightness, and it
     leaves memory for carrying the plate's light). They are kept in the
@@ -476,11 +540,15 @@ def seen_maps(path, world, points, normals, albedo, gloss, shadows=True):
     and the cone are the same, as Mitsuba's answer would be: it takes
     minutes. (The scene Mitsuba sees is taken to go with the points:
     `world` makes it, and is called only if the maps are not kept, so
-    that a rerun does without Mitsuba altogether.)"""
+    that a rerun does without Mitsuba altogether; so with `traced`, which
+    makes the scene lit, for the path tracer: see maps.)"""
     import hashlib
 
     o = OPTICS
-    h = hashlib.sha1(repr((o.cone, o.directions, shadows, LIGHT.tolist(), LIGHT_SIZE, SHADOW_RAYS)).encode())
+    how = (o.cone, o.directions, shadows, LIGHT.tolist(), LIGHT_SIZE, SHADOW_RAYS)
+    if traced:
+        how += ("traced", AMBIENT, PATHS, DEPTH)
+    h = hashlib.sha1(repr(how).encode())
     for a in (points, normals, albedo, gloss):
         h.update(np.ascontiguousarray(a, np.float64).tobytes())
     key = h.hexdigest()
@@ -489,14 +557,14 @@ def seen_maps(path, world, points, normals, albedo, gloss, shadows=True):
             if str(kept["key"]) == key:
                 print(f"brightness maps read back from {path}", flush=True)
                 return kept["alive"], kept["light"]
-    light = maps(world(), points, normals, albedo, gloss, shadows=shadows)
+    light = maps(world(), points, normals, albedo, gloss, shadows=shadows, traced=traced and traced())
     alive = light.max(axis=(1, 2)) > 0
     light = light[alive]
     np.savez(path, key=key, alive=alive, light=light)
     return alive, light
 
 
-def render(name, parts, world, focus, plate_size=PLATE["size"], shadows=True):
+def render(name, parts, world, focus, plate_size=PLATE["size"], shadows=True, traced=None):
     """Makes the hologram of a scene and the eye's views of it, into
     out/<name>: `parts` maps a name to each part's points, normals,
     albedo and gloss (see ball and wall), `world` makes the scene as
@@ -507,7 +575,8 @@ def render(name, parts, world, focus, plate_size=PLATE["size"], shadows=True):
     the eye can see it; too big for memory, it is summed plane to plane
     instead, into the spectrum's file on disk (see planes.py). With
     shadows off, nothing casts shadows (see
-    maps).
+    maps); with `traced`, which makes the scene lit, the points' light is
+    path traced (see maps).
 
     Lit by the reference beam again, the hologram sends out the scene's
     light, and the rest of what it sends goes in other directions: the
@@ -527,7 +596,7 @@ def render(name, parts, world, focus, plate_size=PLATE["size"], shadows=True):
     points, normals, albedo, gloss = (np.concatenate(a) for a in zip(*parts.values()))
     counts = ", ".join(f"{len(p[0])} on the {k}" for k, p in parts.items())
     print(f"{len(points)} points: {counts}", flush=True)
-    alive, light = seen_maps(out / "maps.npz", world, points, normals, albedo, gloss, shadows)
+    alive, light = seen_maps(out / "maps.npz", world, points, normals, albedo, gloss, shadows, traced)
     print(
         f"what each sees and lights, {OPTICS.directions}x{OPTICS.directions} directions each, by Mitsuba: "
         f"{time.time() - start:.1f} s; {alive.sum()} points seen at all",

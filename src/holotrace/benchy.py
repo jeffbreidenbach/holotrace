@@ -2,6 +2,7 @@
 
     holotrace benchy [--scale S] [--spacing D] [--turn A]
                      [--pixel P --cone C [--slab T]] [--plate W] [--wall]
+                     [--traced]
 
 makes it S times as big (default 1), on a plate S times as wide, with
 its surface sampled into points D um apart (default solid.SPACING),
@@ -16,7 +17,10 @@ with --wall: a dim checkered wall just behind the stern, which the boat
 hides in part and casts its shadow on. It reaches past the plate as far
 as the light spreads on the way there, so that no edge of it is seen from
 anywhere: it looks endless. (The planes are then wider than the plate:
-see planes.py.)
+see planes.py.) With --traced (-traced in the name), the light falling
+on each point is worked out by Mitsuba's path tracer, not by rule: soft
+shadows, corners darker than the open, and light off the wall and the
+boat's own surfaces (see solid.maps).
 
 The boat (scenes/3dbenchy, public domain since 2025), scaled to about
 1.7 mm long, stands upright, turned 30 degrees to show its bow, its
@@ -45,8 +49,10 @@ TURN = math.radians(30)
 MIDDLE_Z = 0.0
 ALBEDO, GLOSS = 0.85, 0.25
 # The wall: how far behind the boat's hindmost point, and its squares'
-# size, for a boat of LENGTH.
+# size, for a boat of LENGTH; and how much light its squares reflect
+# (dim, so that the boat stands out against it).
 WALL_GAP, WALL_CHECK = 60.0, 150.0
+WALL_LIGHT, WALL_DARK = 0.3, 0.1
 FOCUS = {"on the bow": -500.0, "on the stern": 500.0}
 
 
@@ -68,23 +74,28 @@ def boat(scale=1.0):
     return scene.reshape(-1, 3, 3)
 
 
-def world(triangles, wall=None):
+def world(triangles, wall=None, lit=False):
     """The boat as Mitsuba sees it, and the wall, if any: how far behind
-    the plate it is, and half its width."""
+    the plate it is, and half its width. With `lit`, under solid's lamp
+    and sky, for the path tracer (see solid.lit): both are matte, the
+    wall as bright as its squares are between them."""
     from .mesh import _mitsuba
 
     mi = _mitsuba()
-    mesh = mi.Mesh("boat", 3 * len(triangles), len(triangles))
+    matte = mi.Properties()
+    matte["mesh_bsdf"] = mi.load_dict({"type": "diffuse", "reflectance": ALBEDO})
+    mesh = mi.Mesh("boat", 3 * len(triangles), len(triangles), matte)
     params = mi.traverse(mesh)
     params["vertex_positions"] = mi.Float(triangles.astype(np.float32).ravel())
     params["faces"] = mi.UInt32(np.arange(3 * len(triangles), dtype=np.uint32))
     params.update()
-    scene = {"type": "scene", "boat": mesh}
+    shapes = {"boat": mesh}
     if wall:
         depth, half = wall
         at = mi.ScalarTransform4f().translate([0, 0, -depth]).scale([half, half, 1])
-        scene["wall"] = {"type": "rectangle", "to_world": at}
-    return mi.load_dict(scene)
+        between = {"type": "diffuse", "reflectance": (WALL_LIGHT + WALL_DARK) / 2}
+        shapes["wall"] = {"type": "rectangle", "to_world": at, "bsdf": between}
+    return solid.lit(shapes) if lit else mi.load_dict({"type": "scene", **shapes})
 
 
 def _option(name, default):
@@ -126,9 +137,13 @@ def main():
         depth = -triangles[..., 2].min() + scale * WALL_GAP
         half = width / 2 + o.cone * o.fade * depth + 2 * spacing
         wall = (depth, half)
-        # Dim, so that the boat stands out against it.
-        parts["wall"] = solid.wall(z=-depth, half=half, light=0.3, dark=0.1, spacing=spacing, check=scale * WALL_CHECK)
+        parts["wall"] = solid.wall(z=-depth, half=half, light=WALL_LIGHT, dark=WALL_DARK, spacing=spacing,
+                                   check=scale * WALL_CHECK)
         focus["on the wall"] = depth
         name += "-wall"
         print(f"a wall {2 * half / 1000:.1f} mm wide, {depth / 1000:.1f} mm behind the plate", flush=True)
-    solid.render(name, parts, lambda: world(triangles, wall), focus, plate_size=size)
+    traced = None
+    if "--traced" in sys.argv:
+        traced = lambda: world(triangles, wall, lit=True)
+        name += "-traced"
+    solid.render(name, parts, lambda: world(triangles, wall), focus, plate_size=size, traced=traced)
