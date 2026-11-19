@@ -24,13 +24,13 @@ _scenes = {}
 
 
 def _mitsuba():
-    """Mitsuba, set to trace on the CPU (or GPU where it can)."""
+    """Mitsuba, set to trace on the CPU (or GPU where it can). Mitsuba
+    is to be had from here, not imported first (see use_best_variant)."""
+    from . import use_best_variant
+
+    use_best_variant()
     import mitsuba as mi
 
-    if mi.variant() is None:
-        from . import use_best_variant
-
-        use_best_variant()
     return mi
 
 

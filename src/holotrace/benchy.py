@@ -31,6 +31,7 @@ plate's light go to out/benchy-... (see the viewer, viewer.py).
 import dataclasses
 import math
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -70,11 +71,9 @@ def boat(scale=1.0):
 def world(triangles, wall=None):
     """The boat as Mitsuba sees it, and the wall, if any: how far behind
     the plate it is, and half its width."""
-    import mitsuba as mi
-
     from .mesh import _mitsuba
 
-    _mitsuba()
+    mi = _mitsuba()
     mesh = mi.Mesh("boat", 3 * len(triangles), len(triangles))
     params = mi.traverse(mesh)
     params["vertex_positions"] = mi.Float(triangles.astype(np.float32).ravel())
@@ -109,7 +108,9 @@ def main():
         wide = ""
     o = solid.OPTICS
     triangles = boat(scale)
+    start = time.time()
     points, normals = sample(triangles, spacing, np.random.default_rng(3))
+    print(f"the boat's surface as points spread evenly, {spacing:g} um apart: {time.time() - start:.1f} s", flush=True)
     hull = (points, normals, np.full(len(points), ALBEDO), np.full(len(points), GLOSS))
     focus = {k: scale * v for k, v in FOCUS.items()}
     # The plate, S times 2048 um across, in whole kept pixels.
@@ -130,4 +131,4 @@ def main():
         focus["on the wall"] = depth
         name += "-wall"
         print(f"a wall {2 * half / 1000:.1f} mm wide, {depth / 1000:.1f} mm behind the plate", flush=True)
-    solid.render(name, parts, world(triangles, wall), focus, plate_size=size)
+    solid.render(name, parts, lambda: world(triangles, wall), focus, plate_size=size)

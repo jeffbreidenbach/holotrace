@@ -26,9 +26,9 @@ can reach, with its true path length, and the plate records their sum.
 
 The latest result is a 4.1 cm plate (163,840² pixels 0.25 µm apart)
 holding a 27 mm boat whose light spreads ±35°, viewed by a simulated eye
-30 cm away. It takes about 30 min on one 8 GB graphics card from 2016
-with an NVMe disk, or about 1.5 hours with a checkered wall behind the
-boat that looks endless from every angle (§6.5).
+30 cm away. It takes 11 min on one 8 GB graphics card from 2016 with an
+NVMe disk, or 45 min with a checkered wall behind the boat that looks
+endless from every angle (§6.5).
 
 ## 2. Conventions
 
@@ -71,9 +71,25 @@ scene (STL) ──sample──▶ points + normals
 
 ### 3.1 Points and brightness maps (`meshes.py`, `solid.maps`)
 
-Surfaces are sampled into points spread evenly by area, about `spacing`
-µm apart (`meshes.sample`). Each point is a light source whose
-brightness depends on direction. For each point and each of
+Surfaces are sampled into points spread evenly, about `spacing` µm
+apart (`meshes.sample`). Evenly, not at random: random points leave gaps
+and clumps that the eye sees as grain (§8.4). So four times too many are
+scattered at random by area, and the most crowded are removed until the
+wanted number is left (sample elimination, after Yuksel). A point is
+crowded by each neighbor within 1.07 spacings, the more the closer.
+
+- **Many at a time.** The method removes the most crowded point, one at
+  a time. `meshes.thinned` removes many at once: a level comes down in
+  steps, and at each step every point above it that is more crowded than
+  all its neighbors goes. Removing every such point whatever its level
+  left the points less even than random ones, because sparse places
+  were thinned as fast as crowded ones.
+- **Cost:** 36 s for the 1.9 million points of the 4 cm boat, from 7.6
+  million scattered.
+- **Result:** the nearest neighbor is 0.68 spacings away at the 1st
+  percentile, where at random it is 0.06.
+
+Each point is a light source whose brightness depends on direction. For each point and each of
 `directions × directions` (32 × 32) directions across the cone, Mitsuba
 3 answers three questions by ray casting:
 
@@ -90,19 +106,42 @@ map stores the **amplitude**, the square root of the power. On the GPU,
 each point's map is read bilinearly in the tangent of the direction to
 each pixel (`seen_at` in `gpu.py`).
 
+The shading is worked out where the rays are traced, on Mitsuba's
+arrays (Dr.Jit, on every core), a chunk of 4000 points and their 4
+million directions at a time. In NumPy it took five times as long as
+the rays themselves: the 4 mm boat's 170,000 points took 12.8 s, and
+now take 1.9 s; the 2 cm boat's 1.9 million took 150–174 s, and now
+take 32 s. The maps agree to 6 × 10⁻⁶ (one direction in 52 million is
+lit in one and not the other).
+
 Mitsuba runs on the CPU (LLVM variant): its GPU variants need compute
-capability 7.5 or newer and **can hang on start** on older cards, so they
-are only tried when `nvidia-smi` reports a new enough card. Even on the
-CPU, Mitsuba/Dr.Jit sometimes hangs at start with no output and one core
-busy. It is random. The cure is to kill the process (by PID, never with
-`pkill` patterns that match the calling shell) and start again.
+capability 7.5 or newer, so they are only tried when `nvidia-smi`
+reports a new enough card.
+
+**The start-up hang, and its cause.** On an older card Mitsuba used to
+hang at start now and then, with no output and one core busy.
+
+- **Cause.** Dr.Jit, which Mitsuba's arrays are made of, looks for a GPU
+  on a thread of its own as it is imported. On finding one too old it
+  prints a warning, which needs Python's lock. If the main thread,
+  holding that lock, has meanwhile called into Dr.Jit, it is waiting
+  for that thread, and each waits on the other for ever.
+- **Reproduced:** a Dr.Jit call straight after `import drjit` hung in
+  7 of 8 starts. In holotrace the call came a little later, so it hung
+  only sometimes.
+- **Cure** (`use_best_variant`): when the card cannot trace, Dr.Jit is
+  told there is no CUDA library to look for (`DRJIT_LIBCUDA_PATH`),
+  before Mitsuba is imported. It prints one line, "Unable to load", and
+  goes on. 0 of 40 starts hung, with a Dr.Jit call straight after.
+- **Mitsuba must be had from `mesh._mitsuba()`,** not imported first, or
+  the setting comes too late.
+- A rerun of a scene whose maps are kept does not load Mitsuba at all.
 
 ### 3.2 The point sum (`gpu.py`)
 
-The heart of it is one CUDA kernel, `seen_many`, launched once for many
-points at a time: the thread blocks are divided among the points' windows
-(the pixels each point's cone can reach), and each thread adds one
-point's wave at one pixel with `atomicAdd`:
+The heart of it is one CUDA kernel, `seen_gather`. Each GPU thread has
+one pixel of the plate, and adds up the waves of the points that reach
+it:
 
 ```
 t      = (pixel − point) / depth                    (tangent, 2D)
@@ -116,10 +155,48 @@ each path, k · depth, is folded into the point's starting phase on the
 CPU in double precision, and the kernel only handles `extra`, which is
 at most tens of micrometers.
 
+**Which points reach a pixel.** The tile being worked out is cut into
+cells 64 pixels square. For each cell, the points whose light reaches
+it are listed; the lists are made on the GPU (`SeenPoints._lists`), at
+most 6 million (point, cell) pairs at a time so that they fit beside a
+big patch. A block of 32 × 8 threads lies within one cell, and each
+thread loops over that cell's list.
+
+**Why a thread per pixel.** The first batched kernel, `seen_many`, gave
+a thread to each wave and added it to the plate with `atomicAdd`. It
+was limited by memory traffic, not arithmetic: two atomic adds per wave.
+A thread per pixel keeps its sum in registers and writes once.
+
+**Lit windows.** A point's window on the plate was the whole disc its
+cone reaches. But only 46% of a seen point's directions carry any
+light: the rest face away or are hidden. So each window is shrunk to
+the box of directions its map lights, one direction more either side
+because the map is blended (`SeenPoints._lit`).
+
+**Fast math.** The kernel is compiled with CUDA's fast math, whose
+sines, square roots and divisions are a little less exact.
+
+| On 150,000 random points, a 7168² tile | Time | Against `seen_many` |
+|---|---|---|
+| `seen_many` (a thread per wave) | 30.5 s | |
+| `seen_gather`, lit windows | 7.2 s | 8 × 10⁻⁷ |
+| + fast math (in use) | 4.0 s | 5 × 10⁻⁵ |
+
+| Whole sum, same points and maps | Before | Now | Spectrum differs |
+|---|---|---|---|
+| 4 mm plate | 28.6 s | 4.4 s | 4.7 × 10⁻⁵ |
+| 2 cm plate, on NVMe | 540 s | 138 s | 4.6 × 10⁻⁵ |
+
+With a sharp cone (no fade), fast math puts a few pixels on the cone's
+very edge on the other side of it: 63 of 4 million in one test. Without
+fast math that test is bit for bit the same as `seen_many`.
+
 **Batching.** One launch per point cost more than the sum itself;
-launching all points at once made it about 3× faster. There is a matching
-reverse kernel (`seen_reverse_many`) for gradients, used by the parked
-speckle optimizer (§8.1).
+launching all points at once made it about 3× faster, before the
+thread-per-pixel kernel. There is a reverse kernel
+(`seen_reverse_many`) for gradients, used by the parked speckle
+optimizer (§8.1). It still gives a block of threads to each tile of
+each point's window, since it sums over a point's pixels.
 
 **Points in front of the plate** send light converging through it, as a
 real image would. Their depth is negative, and the same formula gives
@@ -147,6 +224,10 @@ replaced, on a case small enough for both. In order:
 | Slabs summed before transforming back; zeros never written | the earlier plane-to-plane result, 2 cm and 4 cm | views 0.04–0.09%, unchanged |
 | Wide planes for only the groups that need them (§6.4, step 12) | every group on wide planes, 4 cm with the endless wall, spectrum | 0.65% overall; 0.03–0.13% under sine 0.55; 3.3% in the cone's last degree |
 | Real-eye view (`Look.eye_view`) | brute force (whole plane × sphere's phase, one filter), 4 mm plate | one cell: 0.4–1.2%, correlation 0.9999; 2–3 cells: 2–7%, correlation 0.997–0.999 |
+| A thread per pixel, lit windows, fast math (§3.2) | a thread per wave (`seen_many`), same points and maps, spectrum | 4 mm: 4.7 × 10⁻⁵; 2 cm: 4.6 × 10⁻⁵ |
+| All points at once (`SeenPoints`) | point by point (`holotrace speckle --check`) | light 9 × 10⁻⁷, reverse 2 × 10⁻⁷ |
+| Maps shaded on Mitsuba's arrays (§3.1) | shaded in NumPy, 4 mm boat | 6 × 10⁻⁶ |
+| Scratch planes in half precision, only lit rows written (§6.4, steps 16 and 17) | the run before them, 4 cm spectrum | 2 × 10⁻⁴ inside sine 0.55; 0.5% in the cone's last degree |
 
 The recording planes themselves differ from a direct sum by 1.2–1.6% in
 the brightness of views at ±35° with planes 200 µm from their points,
@@ -199,7 +280,8 @@ far past the cone:
 A 4 cm plate at 0.25 µm has 2.7 × 10¹⁰ pixels and the scene about 1.3
 million visible points. Each point's ±35° cone reaches a disc of a few
 hundred million pixels, so a direct sum would be nearly 10¹⁵ wave
-evaluations. Four ideas bring that down to a couple of hours.
+evaluations. Four ideas brought that down to a couple of hours, and the
+steps of §6.4 since to minutes.
 
 ### 5.1 Recording planes: sum points close, carry the rest by plane waves
 
@@ -230,7 +312,12 @@ Details that matter:
   the middle, so what wraps around the FFT stays in the margin.
 - **FFT sizes.** Patches are padded to sizes with small prime factors
   (`cufft.next_fast_len`). Sizes with large prime factors made cuFFT take
-  far more memory.
+  far more memory. Sizes with no factors but 2 and 3 are faster again: a
+  13,824² patch transforms in 65 ms, a 13,608² one in 92 ms. The big
+  plates' tiles are padded to one of those when it is within 4%
+  (`planes._patch_len`). The tile-by-tile sum is not: a different patch
+  size moves the cone's sharp cut (§6.4), and its results would change
+  by 2% in the cone's last degree for no gain at that size.
 
 ### 5.2 Keep only what the eye can see
 
@@ -283,6 +370,7 @@ SSD, except where NVMe is named.
 | 2 cm, 40960² | tile pipeline: only each tile's patch of each plane | 3.25 min, 19 GB |
 | 4 cm, 81920² | keep only the cone's light, every 2 µm | 19 min, 16 GB |
 | 4 cm | deep slabs summed and carried at the kept 2 µm; 8192 tiles; boat without its wall | 68 s (from 987 s); 2.6 min total |
+| 4 cm | a thread per pixel in the point sum, and the maps shaded on Mitsuba's arrays (§3) | 21 s; 81 s total, 37 s of it spreading the points evenly |
 
 ### 6.2 Wide viewing angle: ±35° at 0.25 µm
 
@@ -353,7 +441,7 @@ go through `planes.sum_by_groups`:
 3. **Transform the plane by rows as it is made.** A band of rows, at most
    6 GB in RAM, is FFT'd along x on the GPU and written to a scratch file
    in column-block layout (n/B, n, B), B = 512. Every later access is one
-   contiguous block.
+   contiguous block. (Since step 16 the file is in half precision.)
 4. **Carry the whole plane to the plate in one step.** For each column
    block: FFT along y on the GPU, multiply by the transfer function for
    the group's distance (cone mask, band limit, phase), and **add it into
@@ -400,7 +488,8 @@ go through `planes.sum_by_groups`:
     costs a transform a tile, about 16 s a group at 4 cm, so the best
     depth there is 300–400 µm, not thinner.
 11. **Brightness maps kept on disk** (`solid.seen_maps`): a rerun of the
-    same scene skips Mitsuba (5 minutes, and its start-up hang).
+    same scene skips Mitsuba (then 5 minutes, and its start-up hang;
+    now half a minute, and no hang: §3.1).
 12. **Wide planes only where needed.** A wide plane costs its area: at
     4 cm with the endless wall (§6.5) the planes are 114,688² against
     the plate's 81,920², twice the work and about 90 GB of scratch each.
@@ -416,6 +505,26 @@ go through `planes.sum_by_groups`:
     block, then along rows on the GPU 256 rows at a time (a whole band
     of rows at that width does not fit an 8 GB card), keeps the plate's
     part, and transforms it again at the plate's width.
+14. **A thread per pixel in the point sum** (§3.2). The point sum was a
+    third of making the planes, about 5.5 minutes at 4 cm. It now takes
+    67 s.
+15. **Faster transform sizes** for the tiles' patches (§5.1).
+16. **Scratch planes in half precision.** With the point sum fast, the
+    disk was over half the run, and most of its traffic was the groups'
+    planes: 49 GB each, written once and read once. They are now kept
+    as two float16 a sample. Each run of 256 rows is divided by a scale
+    of its own, so that its largest part is 30,000 (half precision
+    holds up to 65,504); the scales, one a row, stay in memory and are
+    put back as the plane is read (`planes._plane`, `_add_carried`).
+    The spectrum itself stays in single precision.
+17. **Only the rows light reaches.** Within a band, rows beyond every
+    point's window and the margin its slab's light spreads by are
+    neither transformed nor written (`planes._tile` reports the rows).
+    Before, every row of a band with any light was.
+
+    With steps 16 and 17 the 4 cm boat's seven planes take 66 GB on
+    disk, not 341 GB. All seven then fit on the disk at once, so one
+    pass adds them all and the spectrum is written once.
 
 **Results.**
 
@@ -424,22 +533,51 @@ go through `planes.sum_by_groups`:
 | In-memory carry (removed) | 92 min + 26 min spectrum | ~2 h | 26 GB + 3 GB swap |
 | Plane to plane, SATA SSD | 105 min | ~1 h 50 min | ~4 GB |
 | + steps 6 and 7, on NVMe | 35 min (24 min making planes, 11 min carrying) | ~40 min | ~4 GB (RSS is higher: page cache) |
-| + steps 8 to 11 (faded, 300 µm slabs) | **24 min** (16.5 min making planes, 7.5 min carrying) | ~29 min, 24 min on a rerun | ~4 GB |
+| + steps 8 to 11 (faded, 300 µm slabs) | 24 min (16.5 min making planes, 7.5 min carrying) | ~29 min, 24 min on a rerun | ~4 GB |
+| + even points (§3.1), steps 14 and 15 | 20.9 min (9.4 min making planes, 11.4 min carrying) | 22 min | |
+| + steps 16 and 17 | **9.9 min** (6.8 min making planes, 3.0 min carrying) | **11.1 min** | |
 | With the endless wall, every group on wide planes | 99 min + 8 min cut | ~2 h | |
-| With the endless wall, steps 12 and 13 | **87 min** (38 min the wall's plane, 4.5 min its carry, 16 min the cut, 28 min the boat's groups) | ~1.5 h on a rerun | |
+| With the endless wall, steps 12 and 13 | 87 min (38 min the wall's plane, 4.5 min its carry, 16 min the cut, 28 min the boat's groups) | ~1.5 h on a rerun | |
+| With the endless wall, steps 14 to 17 | **43 min** (9.5 min the wall's plane, 4 min its carry, 15 min the cut, 14 min the boat's groups) | **45 min** | |
 
+- **The 20.9 min run carried in three passes,** not two: 229 GB of disk
+  was free, room for three 49 GB planes at a time. Making the planes
+  is the like-for-like part: 16.5 min before, 9.4 min after.
 - **2 cm:** 878 s by GPU tiles; 1066 s plane to plane; 892 s with steps 6
-  and 7 on SATA.
+  and 7 on SATA. On NVMe: 540 s with steps 8 to 13, 138 s with step 14,
+  113 s with steps 16 and 17 (131 s on SATA). The whole run from
+  scratch takes 3.0 min on NVMe and 3.3 min on SATA.
 - **Accuracy:** views agree with the old method to 0.04–0.09% throughout.
+- **Steps 16 and 17 against the run before them** (4 cm spectrum, same
+  points): 2 × 10⁻⁴ inside sine 0.55, which is half precision's (a
+  small plate with every row lit differs by 1.7 × 10⁻⁴ throughout), and
+  0.5% in the cone's last degree. That last is step 17: the cone's
+  sharp cut leaves a faint ripple beyond where light reaches, and the
+  rows that held only that ripple are no longer kept. The same region
+  already differs by a few percent between grids (next item).
 - **A sharp cone on different grids.** Sums made on planes of different
   widths place the cone's sharp cut slightly differently, and differ by
   a few percent in its last degree (sine 0.565–0.574) and well under
   0.5% inside sine 0.55. It is not wrap-around: the difference is not
   gathered at the plate's edges.
-- **Where the time goes now:** no one thing. Of the 16.5 minutes making
-  planes, roughly a third each is the point sum, the transforms, and
-  writing the scratch planes (49 GB each); the rest is the carry, which
-  the disk limits. A run writes about 400 GB.
+- **With the wall, the cut is now the largest part:** 15 of 43 minutes,
+  and steps 14 to 17 do not touch it. The wide sum it works on is still
+  in single precision, 68 GB of it. §12 has a way to do without the
+  wide planes and the cut altogether.
+- **Where the time goes now** (4 cm without the wall, each part timed,
+  in a run of 670 s made just before the last small saving):
+
+  | Part | Time |
+  |---|---|
+  | Point sum | 67 s |
+  | Tiles' transforms and steps | 95 s |
+  | Other tile work (maps to the GPU, clearing and adding patches) | 79 s |
+  | Bands: tiles off the GPU, row transforms, writing the planes | 211 s |
+  | The carry: reading the planes, column transforms, writing the spectrum | 215 s |
+
+  Nearly two thirds is moving data: between GPU and memory, and to and
+  from the disk, which reads at 1.3–1.5 GB/s through the file system.
+  A run writes about 100 GB (it was about 400 GB).
 - **Tried and left out:** recording planes closer than 200 µm (error up
   from 2.1% to 2.6% at 100 µm); slabs thinner than 300 µm (slower at
   4 cm).
@@ -448,20 +586,25 @@ go through `planes.sum_by_groups`:
 - **Scaling:** cost now grows with plate area × number of groups, not
   depth squared. Depth is no longer limited by memory.
 
-**Disk needed:** the spectrum plus one scratch plane, 2 × (n² × 8 bytes), at
-the least; with more, more groups go in each pass. Wide planes need
-more: the 4 cm plate with the endless wall takes about 200 GB while it
-is made.
+**Disk needed:** the spectrum plus one scratch plane in half precision,
+1.5 × (n² × 8 bytes), at the least; with more, more groups go in each
+pass. Wide planes need more: the 4 cm plate with the endless wall took
+174 GB at most while it was made.
+
+The plate that fits, worked out from that (not run):
 
 | Viewing cone | Kept pitch | Plate for 91 GB free | For ~160 GB | For ~670 GB |
 |---|---|---|---|---|
-| ±35° | 0.5 µm | 3.7 cm | 4.9 cm | 10 cm |
-| ±24° | 0.75 µm | 5.5 cm | 7.4 cm | 15 cm |
-| ±15° | 1.0 µm | 7.3 cm | 9.9 cm | 20 cm |
+| ±35° | 0.5 µm | 4.3 cm | 5.7 cm | 11.5 cm |
+| ±24° | 0.75 µm | 6.4 cm | 8.5 cm | 17 cm |
+| ±15° | 1.0 µm | 8.4 cm | 11.4 cm | 23 cm |
 
 The disk matters: moving from the SATA SSD to NVMe cut the 4 cm run by
-well over half. 10 cm at ±35° is estimated at 7–9 h on that GPU with
-enough NVMe, or 1–2 h on a rented 4090-class card (not run).
+well over half, before steps 16 and 17 made the planes small. (At 2 cm
+the SATA disk now costs 18 s of a 3 minute run; 4 cm on SATA has not
+been rerun.) 10 cm at ±35° was estimated at 7–9 h on that GPU with
+enough NVMe, before steps 14 to 17 more than halved the 4 cm run. Not
+run.
 
 ### 6.5 The endless wall (`benchy --wall`)
 
@@ -482,6 +625,12 @@ million of them seen at all.
 - **Maps in half precision from the start** (`solid.maps`): five million
   32 × 32 maps are 10 GB as float16; as float32, with the copies made on
   the way, they did not fit in memory.
+- **The wall's points are not thinned** like the boat's (§3.1): they
+  are a grid, each point moved at random within its square
+  (`solid.wall`), which is already nearly as even. On a flat sheet such
+  a grid's contrast under a 0.04 rad lamp, averaged over 12 sets of
+  phases, was 0.18 (0.044 after the retina's blur), against 0.41
+  (0.195) at random.
 - **Its light lands beyond the plate,** which is what steps 12 and 13 of
   §6.4 are for.
 
@@ -625,9 +774,46 @@ red LED behind a diffuser 1–2 cm across, about a meter away**, not a
 laser.
 
 The retina-blurred contrast levels off near 0.18. Part of that is the
-boat's real shading, which the metric also counts. A speckle-free
-reference, averaged over many random phase sets, was not made, so the
-split is not measured.
+boat's real shading, which the metric also counts, and part was grain
+from the points' random scatter (§8.4). These numbers are for points
+scattered at random.
+
+### 8.4 Grain from random points: cured by spreading them evenly
+
+Points scattered at random over a surface leave gaps and clumps: a
+patch that holds n points on average holds n ± √n. The eye's resolution
+cell holds about 10 points 32 µm apart, so its brightness varies by
+about 30% from the scatter alone. It looks like speckle, but it is in
+the scene, not the light, and a lamp does not average it away.
+
+- **It is not speckle.** A flat matte sheet of random points 32 µm
+  apart, lit by a 0.04 rad lamp, showed contrast 0.46 (0.22 after the
+  retina's blur). Averaged over 12 sets of random phases, which would
+  wash speckle out, it was still 0.41 (0.195).
+- **Without any speckle** (points of equal brightness added as
+  intensities, through the eye's blur), a random sheet gives 0.41
+  (0.19) at 32 µm and 0.20 (0.095) at 16 µm. Spread evenly
+  (`meshes.sample`, §3.1) it gives 0.14 (0.06) and 0.065 (0.03).
+
+On the boat, 1 cm long on a 2 cm plate, with the points at random and
+spread evenly. Contrast is std over the local mean (a Gaussian of
+σ = 300 µm) on the smooth, lit parts of the hull, the same parts in
+both, from two eye positions 30 cm away:
+
+| Light | 12 µm, random | 12 µm, even | 32 µm, random | 32 µm, even |
+|---|---|---|---|---|
+| Laser | 0.985 (0.370) | 0.971 (0.352) | 1.042 (0.405) | 0.940 (0.352) |
+| Lamp 0.01 rad | 0.457 (0.231) | 0.444 (0.224) | 0.557 (0.281) | 0.374 (0.194) |
+| Lamp 0.02 rad | 0.370 (0.204) | 0.342 (0.191) | 0.475 (0.261) | 0.277 (0.167) |
+| Lamp 0.04 rad | 0.283 (0.176) | 0.248 (0.154) | 0.383 (0.238) | 0.215 (0.154) |
+
+- **At 32 µm,** the spacing of the 4 cm boat, even points cut the
+  contrast under a 0.02 rad lamp from 0.475 to 0.277.
+- **Even points 32 µm apart look smoother under a lamp than random
+  points 12 µm apart,** with a seventh as many points.
+- **At 12 µm** the gain is small: some 70 points to a cell were already
+  nearly smooth.
+- **By laser** it changes little: speckle dominates.
 
 ## 9. What the results do not include (compromises)
 
@@ -641,6 +827,16 @@ split is not measured.
   one glossy highlight, one disc light.
 - **32 × 32 directions per point** (about 2.2° apart at ±35°): highlights
   and occlusion edges are blended between those directions.
+- **Occlusion edges are soft, and finer maps alone would not sharpen
+  them.** Where a point passes from seen to hidden, the edge is about
+  sqrt(λ / z) wide in angle, z being the recording plane's distance: it
+  is set by diffraction between the point and its plane. In a 1D model
+  with planes 200–500 µm from the point, the edge was 2.0–2.7° wide
+  whether the map had 32 directions, 128, or was perfectly sharp (the
+  pupil takes in 0.76°). A plane 1 mm away gave 1.2°, and 3.6 mm gave
+  0.74°. On a wall 10 mm behind what hides it, 2.0–2.7° is a soft edge
+  0.3–0.5 mm wide. Sharper edges need both far planes for such points
+  and finer maps. Not tried in the pipeline.
 - **Recording-plane error:** about 2% in the field's amplitude within
   the cone, 4% at its very edge (§4).
 - **Viewer approximations:** the real eye's view is cut into cells (§7),
@@ -656,9 +852,9 @@ split is not measured.
 | `magnifier.py` | Step 1: dots behind an analytic lens; shared constants (`WAVELENGTH`, `PLATE`, `CONE`, `REFERENCE`, `PUPIL`) and image helpers. |
 | `lens.py`, `plate.py`, `eye.py` | The analytic lens with exact ray aiming; the CPU plate (reference implementation); the far-away eye of the early steps. |
 | `mesh.py`, `meshed.py` | Step 2: the lens as a Mitsuba mesh; Mitsuba setup (`_mitsuba`, which picks a variant the card supports). |
-| `gpu.py` | CUDA kernels via CuPy: `direct`, `through_lens` (Hermite-blended path lengths), `seen` / `seen_many` and their reverse kernels; `GpuPlate`, `SeenPoints`. |
+| `gpu.py` | CUDA kernels via CuPy: `direct`, `through_lens` (Hermite-blended path lengths), `seen` / `seen_gather` and their reverse kernels; `GpuPlate`, `SeenPoints`. |
 | `gpucheck.py` | GPU against CPU. |
-| `meshes.py` | STL reading and sampling surfaces into points. |
+| `meshes.py` | STL reading and sampling surfaces into evenly spread points. |
 | `solid.py` | Step 3 scene (ball and wall); `maps` (Mitsuba visibility and shading); `Optics` / `Optics.wide`; `sum_planes` (tile by tile, for plates that fit in memory); `_carry`; `render` (the whole pipeline). |
 | `planes.py` | Plane-to-plane sum for plates too big for memory (§6.4). |
 | `benchy.py` | The boat: `--scale`, `--spacing`, `--turn`, `--plate`, `--pixel`, `--cone`, `--slab`, `--wall`. |
@@ -674,19 +870,21 @@ separately). A non-default turn is added as `-turn15`.
 
 ```
 uv run --extra gpu holotrace benchy --plate 20.48 --scale 6 --spacing 12 --turn 15 --pixel 0.25 --cone 35 --slab 300
-#   2 cm plate, 1 cm boat: ~17 min, 13 GB spectrum (8 GB on disk)
+#   2 cm plate, 1 cm boat: 3 min, 13 GB spectrum (8 GB on disk)
 uv run --extra gpu holotrace benchy --plate 40.96 --scale 16 --spacing 32 --pixel 0.25 --cone 35 --slab 300
-#   4 cm plate, 27 mm boat: ~30 min on NVMe (set HOLOTRACE_OUT to a folder on it);
-#   the spectrum 33 GB on disk, and 50 to 200 GB of scratch while running
-#   add --wall for the endless wall: ~1.5 h, about 200 GB of disk while running
+#   4 cm plate, 27 mm boat: 11 min on NVMe (set HOLOTRACE_OUT to a folder on it);
+#   the spectrum 33 GB on disk, and up to 66 GB of scratch while running
+#   add --wall for the endless wall: 45 min, up to 174 GB of disk while running
 uv run --extra gpu holotrace view benchy-40.96mm-32um-35deg-0.25um-boat16 --eye 300 --focus 0
 #   real-eye movie, laser: ~5 min
 uv run --extra gpu holotrace view benchy-40.96mm-32um-35deg-0.25um-boat16 --eye 300 --focus 0 --source 0.02
 #   the same lit by a lamp 0.02 rad across: ~17 min
 ```
 
-If a run prints nothing for more than a minute after starting, Mitsuba
-has hung at start (§3.1): kill it and run it again.
+A run's first line comes after the points are spread evenly, 37 s for
+the 4 cm boat. On a card too old for Mitsuba to trace on, Dr.Jit then
+prints one line, "Unable to load": that is the cure for the start-up
+hang (§3.1), not a fault.
 
 ## 12. Where to go next
 
@@ -702,10 +900,23 @@ In the order recommended:
    glass, a service for computed holograms, a photoplotter). Its pixel
    size and levels fix the optics.
 3. **Go bigger** (§6.4). It needs only disk: 10 cm at ±35° needs about
-   670 GB and roughly 2–3 days on a SATA SSD, much less on NVMe and a
-   newer GPU.
-4. **Smaller items:**
-   - retry Mitsuba's start automatically when it hangs;
+   500 GB. Not run, and not timed.
+4. **Richer light.** Mitsuba is used only to ask whether a ray is
+   blocked; the shading is `solid.maps`' own: matte, ambient, one
+   highlight, one light. Mitsuba's path tracer can be asked for the
+   light along any batch of rays (`integrator.sample`), bounces and all:
+   512,000 (point, direction) pairs at 32 paths each took 1.3 s here.
+   That would give area and sky light, light bounced between surfaces,
+   textures, and any of its materials, with no change to the sum.
+5. **The endless wall without wide planes.** Leave out, in the point
+   sum, each ray that would land beyond the plate, and make the planes
+   periodic at the plate's own width: no wide planes, no cut. Tried on
+   a 4 mm plate as a prototype (not in the code): the plate's light
+   400 µm in from its edges matched the wide planes' to 0.00% for sines
+   under 0.5, and differed by 2.9% in the cone's last degree. The cost
+   is a faded border, 1.6% off at 50–100 µm from the edge with a 25 µm
+   fade. Not run at 4 cm.
+6. **Smaller items:**
    - richer materials;
    - a glass scene, to test the original magnifying-glass idea at scale;
    - automated tests for the checks in §4;

@@ -25,6 +25,7 @@ Mitsuba traces the scene; the waves are summed separately.
 Add --gpu to magnifier or mesh to sum the light on an NVIDIA GPU.
 """
 
+import os
 import sys
 
 # Mitsuba's variants, best first: on the GPU (which needs an NVIDIA card
@@ -36,7 +37,7 @@ VARIANTS = ["cuda_ad_mono", "llvm_ad_mono", "scalar_mono"]
 def _gpu_can_trace() -> bool:
     """Whether there is an NVIDIA GPU new enough for Mitsuba (compute
     capability 7.5). Asked of nvidia-smi, not Mitsuba: on an older card,
-    Mitsuba's GPU variant can hang starting up instead of failing."""
+    Mitsuba can hang starting up (see use_best_variant)."""
     import subprocess
 
     try:
@@ -49,11 +50,30 @@ def _gpu_can_trace() -> bool:
         return False
 
 
+_variant = None
+
+
 def use_best_variant() -> str:
-    """Selects the fastest Mitsuba variant that works here, and returns it."""
+    """Selects the fastest Mitsuba variant that works here, and returns
+    it. Mitsuba must not be imported before this is called.
+
+    Dr.Jit, which Mitsuba's arrays are made of, looks for a GPU as it is
+    imported, on a thread of its own, and on finding one too old says so.
+    Saying so needs Python's lock; if the main thread, holding that lock,
+    has meanwhile asked Dr.Jit for anything, it is waiting for that
+    thread, and each waits on the other for ever: one core busy, nothing
+    printed. Whether it happens is a matter of timing (about one start
+    in five, here). So with no GPU it can use, Dr.Jit is told there is
+    no CUDA to look for, which it notes in a line of its own, "Unable to
+    load", and all is well."""
+    global _variant
+    if _variant:
+        return _variant
+    gpu = _gpu_can_trace()
+    if not gpu:
+        os.environ.setdefault("DRJIT_LIBCUDA_PATH", "no CUDA for Mitsuba (this GPU is too old for it)")
     import mitsuba as mi
 
-    gpu = _gpu_can_trace()
     for variant in VARIANTS:
         if variant not in mi.variants() or (variant.startswith("cuda") and not gpu):
             continue
@@ -61,6 +81,7 @@ def use_best_variant() -> str:
             mi.set_variant(variant)
             # The GPU variant only fails once it is used.
             mi.load_dict({"type": "scene"})
+            _variant = variant
             return variant
         except Exception:
             continue
@@ -109,9 +130,9 @@ def main() -> None:
 
 
 def check() -> None:
+    variant = use_best_variant()
     import mitsuba as mi
 
-    variant = use_best_variant()
     print(f"Mitsuba {mi.__version__}, variant {variant}")
 
     # A ray straight at a unit sphere 5 units away should hit it 4 units out.

@@ -23,6 +23,11 @@ All the light is within the cone, a circle in the spectrum, so only that
 part of each file is ever written or read: the rest stays as holes in
 the file, which read as zeros.
 
+The disk is what limits a big plate, and most of what it carries is the
+groups' planes, written once and read once. So they are kept in half
+precision (each run of rows scaled to make the most of it), and only
+their rows that any light reaches are written.
+
 The plane's transform is periodic: light leaving one side would come
 back in the other. As long as all the scene's light lands on the plate,
 nothing does. Groups some of whose light lands beyond are summed on
@@ -95,22 +100,24 @@ def sum_by_groups(points, light, phases, size, path):
         all, and it is read and written less often."""
         blocks = width // block
         low, high = _cone(width, block)[:2]
-        each = 8 * width * width * (low + blocks - high) / blocks
+        each = 4 * width * width * (low + blocks - high) / blocks
         per = PER or max(1, int((0.9 * shutil.disk_usage(path.parent).free - each) / each))
         for i in range(0, len(some), per):
             made = []
             for k, g in enumerate(some[i : i + per]):
                 middle, slabs = groups[g]
                 t = time.time()
-                # A new file each time, so that what is not written is zero.
-                plane = _scratch(path, f"plane{k}", (blocks, width, block))
-                _plane(points, slabs, middle, light, phases, width, plane)
-                made.append((plane, middle))
+                # A new file each time, so that what is not written is
+                # zero. In half precision: real and imaginary parts side
+                # by side.
+                plane = _scratch(path, f"plane{k}", (blocks, width, 2 * block), np.float16)
+                scale = _plane(points, slabs, middle, light, phases, width, plane)
+                made.append((plane, middle, scale))
                 print(f"  group {g + 1} of {len(groups)}, {len(slabs)} slabs, its plane {middle / 1000:+.2f} mm: "
                       f"made in {time.time() - t:.0f} s; {time.time() - start:.0f} s", flush=True)
             t = time.time()
             _add_carried(made, sums, first=first and i == 0)
-            for plane, _ in made:
+            for plane, _, _ in made:
                 _remove(plane)
             del made, plane
             print(f"  carried to the plate in {time.time() - t:.0f} s; {time.time() - start:.0f} s", flush=True)
@@ -165,8 +172,14 @@ def _plane(points, slabs, middle, light, phases, width, plane):
     blocks of columns; new, so all zeros), already transformed along its
     rows: worked out a band of rows at a time, each tile of a band
     gathering each slab's light and carrying it to the middle (_tile),
-    then the band transformed on the GPU. Bands with no light are not
-    written at all, nor the columns outside the cone (see _cone)."""
+    then the band transformed on the GPU. Only the rows any light reaches
+    are transformed and written, and of those only the columns inside
+    the cone (see _cone).
+
+    The plane is kept in half precision, real and imaginary parts side by
+    side, each run of rows divided by a scale of its own so that its
+    largest part is well within what half precision holds. Returns each
+    row's scale."""
     import cupy as cp
     import cupyx.scipy.fft as cufft
 
@@ -183,37 +196,48 @@ def _plane(points, slabs, middle, light, phases, width, plane):
         parts.append((at, mine, seen_from, margin, bounds))
     deepest = max(m for _, _, _, m, _ in parts)
     tile = min(width, (solid.GPU_PATCH - 2 * deepest) // 256 * 256, BAND // (8 * width) // 256 * 256)
-    blocks, block = plane.shape[0], plane.shape[2]
-    low, high = _cone(width, block)[:2]
+    blocks = plane.shape[0]
+    low, high = _cone(width, plane.shape[2] // 2)[:2]
     band = np.empty((tile, width), np.complex64)
+    halved = np.empty((tile, 2 * width), np.float16)
+    scale = np.ones(width, np.float32)
     for y0 in range(0, width, tile):
         th = min(tile, width - y0)
-        band[:th] = 0
-        lit = False
+        # The band's rows that any light reaches, from `first` up to
+        # `last`, and its tiles that none does.
+        first, last, dark = th, 0, []
         for x0 in range(0, width, tile):
             tw = min(tile, width - x0)
-            out = _tile(parts, middle, light, phases, width, (x0, y0, tw, th), deepest)
-            if out is not None:
+            out, rows = _tile(parts, middle, light, phases, width, (x0, y0, tw, th), deepest)
+            if out is None:
+                dark.append(slice(x0, x0 + tw))
+            else:
                 band[:th, x0 : x0 + tw] = cp.asnumpy(out)
-                lit = True
+                first, last = min(first, rows[0]), max(last, rows[1])
             del out
-        if not lit:
-            continue
-        for r in range(0, th, 256):
-            rows = cufft.fft(cp.asarray(band[r : min(r + 256, th)]), axis=1, overwrite_x=True)
-            band[r : r + len(rows)] = cp.asnumpy(rows)
-            del rows
-        blocked = band[:th].reshape(th, blocks, block).transpose(1, 0, 2)
-        plane[:low, y0 : y0 + th, :] = blocked[:low]
-        plane[high:, y0 : y0 + th, :] = blocked[high:]
+        for columns in dark:
+            band[first:last, columns] = 0
+        for r in range(first, last, 256):
+            run = cufft.fft(cp.asarray(band[r : min(r + 256, last)]), axis=1, overwrite_x=True).view(cp.float32)
+            # (Half precision holds up to 65,504.)
+            by = float(cp.abs(run).max()) / 3e4 or 1.0
+            halved[r : r + len(run)] = cp.asnumpy((run * np.float32(1 / by)).astype(cp.float16))
+            scale[y0 + r : y0 + r + len(run)] = by
+            del run
+        if last > first:
+            blocked = halved[first:last].reshape(last - first, blocks, -1).transpose(1, 0, 2)
+            plane[:low, y0 + first : y0 + last, :] = blocked[:low]
+            plane[high:, y0 + first : y0 + last, :] = blocked[high:]
     cp.get_default_memory_pool().free_all_blocks()
     cp.fft.config.get_plan_cache().clear()
+    return scale
 
 
 def _tile(parts, middle, light, phases, width, box, deepest):
     """The light of a group's slabs (`parts`, as _plane lists them) on the
     tile `box` (x, y, width, height) of its middle plane, on the GPU, or
-    None if none reaches it. Each slab's light is summed on its recording
+    None if none reaches it; and the tile's rows any of it reaches (from,
+    and up to). Each slab's light is summed on its recording
     plane over the tile and the slab's own margin, into a patch with
     the deepest slab's margin all round, and transformed; its plane waves
     are moved on to the middle (solid._step) and added to the other
@@ -227,14 +251,19 @@ def _tile(parts, middle, light, phases, width, box, deepest):
     o = solid.OPTICS
     pitch = o.kept_pitch
     x0, y0, tw, th = box
-    h, w = solid._fast_len(th + 2 * deepest), solid._fast_len(tw + 2 * deepest)
+    h, w = _patch_len(th + 2 * deepest), _patch_len(tw + 2 * deepest)
     total = None
+    first, last = th, 0
     for at, mine, seen_from, m, (lo_x, hi_x, lo_y, hi_y) in parts:
         ox, oy, sw, sh = x0 - m, y0 - m, tw + 2 * m, th + 2 * m
         near = (hi_x > ox) & (lo_x < ox + sw) & (hi_y > oy) & (lo_y < oy + sh)
         if not near.any():
             continue
         which = mine[near]
+        # Its light reaches no farther on the middle plane than its
+        # points' windows and the margin it spreads by on the way.
+        first = min(first, int(lo_y[near].min()) - m - y0)
+        last = max(last, int(hi_y[near].max()) + m - y0)
         seen = SeenPoints(size=width, pitch=pitch, wavelength=WAVELENGTH, points=seen_from[near],
                           maps=cp.asarray(light[which], cp.float32), cone=o.cone, tile=(ox, oy, sw, sh),
                           edge=o.cone * o.fade)
@@ -253,14 +282,26 @@ def _tile(parts, middle, light, phases, width, box, deepest):
         del patch
         cp.get_default_memory_pool().free_all_blocks()
     if total is None:
-        return None
+        return None, None
     cp.get_default_memory_pool().free_all_blocks()
     total = cufft.ifft2(total, overwrite_x=True)
     out = total[deepest : deepest + th, deepest : deepest + tw].copy()
     del total
     cp.get_default_memory_pool().free_all_blocks()
     cp.fft.config.get_plan_cache().clear()
-    return out
+    return out, (max(first, 0), min(last, th))
+
+
+def _patch_len(n):
+    """The size to pad a tile's patch, `n` samples across, to for its
+    transforms: one the GPU's transform handles well (small prime
+    factors: others take it far more memory), and of those, if there is
+    one within a few percent that the GPU has room for, one with no
+    factors but 2 and 3, which it does a third faster (a patch 13,824
+    square in 65 ms, one 13,608 square in 92)."""
+    plain = solid._fast_len(n)
+    best = min(2**a * 3**b for a in range(20) for b in range(13) if 2**a * 3**b >= n)
+    return best if best <= max(plain, min(int(1.04 * n), solid.GPU_PATCH)) else plain
 
 
 def _cone(width, block):
@@ -283,7 +324,8 @@ def _cone(width, block):
 
 def _add_carried(planes, sums, first):
     """Transforms each of `planes` (each a plane, already transformed
-    along its rows, and its distance behind the plate) along its columns,
+    along its rows, its distance behind the plate, and its rows' scales:
+    see _plane) along its columns,
     a block at a time, carries it to the plate (its plane waves within
     the cone and the band limit, each moved on by its own phase, as in
     solid._carry), and adds them all to `sums` (or, if `first`, puts them
@@ -299,6 +341,7 @@ def _add_carried(planes, sums, first):
     fy = cp.fft.fftfreq(width, pitch).astype(cp.float32)[:, None]
     fx = np.fft.fftfreq(width, pitch).astype(np.float32)
     rows = _cone(width, block)[2]
+    scales = [cp.asarray(scale)[:, None] for _, _, scale in planes]
     for j in range(blocks):
         if rows[j] == 0:
             continue
@@ -306,9 +349,12 @@ def _add_carried(planes, sums, first):
         r = int(rows[j])
         parts = [slice(None)] if 2 * r >= width else [slice(0, r), slice(width - r, width)]
         total = [None] * len(parts)
-        for plane, middle in planes:
+        for (plane, middle, _), scale in zip(planes, scales):
             limit = 1 / (lam * math.sqrt((2 * middle / (width * pitch)) ** 2 + 1))
-            cols = cufft.fft(cp.asarray(plane[j]), axis=0, overwrite_x=True)
+            # Back from half precision.
+            cols = cp.asarray(plane[j]).astype(cp.float32).view(cp.complex64)
+            cols *= scale
+            cols = cufft.fft(cols, axis=0, overwrite_x=True)
             for i, part in enumerate(parts):
                 there = solid.moved(cols[part], x, fy[part], middle, limit, limit)
                 total[i] = there if total[i] is None else total[i] + there
@@ -374,8 +420,8 @@ def _cut_rows(sums, out, edge, path):
     cp.get_default_memory_pool().free_all_blocks()
 
 
-def _scratch(path, what, shape):
-    return np.lib.format.open_memmap(path.with_name(f"{what}.tmp.npy"), "w+", np.complex64, shape)
+def _scratch(path, what, shape, kind=np.complex64):
+    return np.lib.format.open_memmap(path.with_name(f"{what}.tmp.npy"), "w+", kind, shape)
 
 
 def _remove(a):

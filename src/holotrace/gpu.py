@@ -201,8 +201,10 @@ extern "C" __global__ void through_lens(
     light[at] += complex<float>(w * cs, w * s);
 }
 // ---- Many points at once ----
-// Each point's window of pixels is cut into tiles of 32 x 8, one per
-// block, numbered point after point: point j's from start[j] up to
+// Forward (seen_gather), each thread has a pixel of the plate and adds
+// up the points that reach it. In reverse (seen_reverse_many), each
+// point's window of pixels is cut into tiles of 32 x 8, one per block,
+// numbered point after point: point j's from start[j] up to
 // start[j + 1]. A block finds its point by binary search.
 
 __device__ int owner(const int* start, int count, int b) {
@@ -266,25 +268,45 @@ __device__ bool tile_pixel(
     return *i < nx[*j] && *jj < ny[*j];
 }
 
-// `seen` for every point: adds their light into `light` (interleaved
-// real, imaginary), atomically, since windows overlap. `light` is the
-// part of the plate from pixel (ox, oy), `width` pixels across; the
-// points' windows lie within it.
-extern "C" __global__ void seen_many(
-    float* light, int size, int ox, int oy, int width, float pitch, float k, float cone, float edge,
-    int count, const int* start, const int* x0, const int* y0, const int* nx, const int* ny,
+// `seen` for every point, onto the tile of the plate tw x th pixels from
+// (tx, ty). The tile is cut into square cells, `cell` pixels across,
+// cells_x of them in a row, and each cell has a list of the points whose
+// light reaches it: for cell c, list[cell_start[c]] up to
+// list[cell_start[c + 1]]. Each thread has one pixel and adds up its
+// cell's points there. Nothing else writes to its pixel, so the sum
+// stays in the thread until it is whole. (With a thread to each wave,
+// each added to the plate atomically as windows overlap, the sum took
+// several times as long: the memory was what was slow, not the
+// arithmetic.) `light` (interleaved real, imaginary) is the part of the
+// plate from pixel (ox, oy), `width` pixels across; the tile lies
+// within it.
+extern "C" __global__ void seen_gather(
+    float* light, int size, int ox, int oy, int width,
+    int tx, int ty, int tw, int th, float pitch, float k, float cone, float edge,
+    int cell, int cells_x, const int* cell_start, const int* list,
     const float* px, const float* py, const float* depth, const float* phase,
     const float* maps, int n)
 {
-    int j, i, jj;
-    if (!tile_pixel(start, count, nx, ny, &j, &i, &jj)) return;
-    int col = x0[j] + i, row = y0[j] + jj;
-    complex<float> v;
-    if (!seen_at(col, row, size, pitch, k, px[j], py[j], depth[j], phase[j], cone, edge,
-                 maps + (size_t)j * n * n, n, &v)) return;
-    int at = 2 * ((row - oy) * width + (col - ox));
-    atomicAdd(light + at, v.real());
-    atomicAdd(light + at + 1, v.imag());
+    int i = blockIdx.x * blockDim.x + threadIdx.x;
+    int jj = blockIdx.y * blockDim.y + threadIdx.y;
+    if (i >= tw || jj >= th) return;
+    int c = (jj / cell) * cells_x + i / cell;
+    int at = cell_start[c], end = cell_start[c + 1];
+    if (at == end) return;
+    int col = tx + i, row = ty + jj;
+    float re = 0, im = 0;
+    for (; at < end; at++) {
+        int j = list[at];
+        complex<float> v;
+        if (seen_at(col, row, size, pitch, k, px[j], py[j], depth[j], phase[j], cone, edge,
+                    maps + (size_t)j * n * n, n, &v)) {
+            re += v.real();
+            im += v.imag();
+        }
+    }
+    float* out = light + 2 * ((size_t)(row - oy) * width + (col - ox));
+    out[0] += re;
+    out[1] += im;
 }
 
 // `seen_reverse` for every point, into out (2 per point).
@@ -322,17 +344,23 @@ extern "C" __global__ void seen_reverse_many(
 }
 """
 
-_module = None
+_modules = {}
 
 
-def _kernel(name):
-    global _module
-    if _module is None:
-        _module = cp.RawModule(code=_SOURCE)
-    return _module.get_function(name)
+def _kernel(name, fast=False):
+    """A kernel of the source above, compiled; with `fast`, with CUDA's
+    fast math (see SeenPoints.light)."""
+    if fast not in _modules:
+        _modules[fast] = cp.RawModule(code=_SOURCE, options=("--use_fast_math",) if fast else ())
+    return _modules[fast].get_function(name)
 
 
 _BLOCK = (32, 8)
+# The cells the plate is cut into for SeenPoints.light, in pixels across
+# (whole blocks), and how many (point, cell) pairs are listed for one
+# launch: more would not fit on the GPU beside a big patch of the plate.
+_CELL = 64
+_PAIRS = 6_000_000
 
 
 def _blocks(nx, ny):
@@ -468,11 +496,11 @@ class GpuPlate(Plate):
 
 
 class SeenPoints:
-    """Many points' light, as GpuPlate.add_seen sums it, but all in one
-    GPU launch: launching one per point costs far more than the sum.
-    The points and their maps (on the GPU: one n x n map each) are fixed;
-    their phases are given each time. With `tile` (x, y, width, height,
-    in pixels), only that part of the plate is worked out."""
+    """Many points' light, as GpuPlate.add_seen sums it, but all at once:
+    launching one sum per point costs far more than the sum. The points
+    and their maps (on the GPU: one n x n map each) are fixed; their
+    phases are given each time. With `tile` (x, y, width, height, in
+    pixels), only that part of the plate is worked out."""
 
     def __init__(self, size, pitch, wavelength, points, maps, cone, tile=None, edge=None):
         self.size, self.pitch, self.cone = size, pitch, cone
@@ -484,24 +512,88 @@ class SeenPoints:
         self.maps = maps
         px, py, pz = (np.asarray(a, float) for a in np.asarray(points).T)
         self.depth = -pz
-        # Each point's window, as Plate.window has it.
-        r = self.edge * np.abs(self.depth)
-        lo_x = np.clip(np.floor((px - r) / pitch + size / 2), ox, ox + tw).astype(np.int64)
-        hi_x = np.clip(np.ceil((px + r) / pitch + size / 2) + 1, ox, ox + tw).astype(np.int64)
-        lo_y = np.clip(np.floor((py - r) / pitch + size / 2), oy, oy + th).astype(np.int64)
-        hi_y = np.clip(np.ceil((py + r) / pitch + size / 2) + 1, oy, oy + th).astype(np.int64)
-        nx, ny = np.maximum(hi_x - lo_x, 0), np.maximum(hi_y - lo_y, 0)
-        tiles = -(-nx // _BLOCK[0]) * -(-ny // _BLOCK[1])
-        start = np.concatenate([[0], np.cumsum(tiles)])
-        if start[-1] >= 2**31:
-            raise ValueError("too many tiles for one launch")
-        self.blocks = int(start[-1])
-        i32, f32 = np.int32, np.float32
+        # Each point's window: the pixels of the tile its light reaches,
+        # as Plate.window has it, but no farther than the directions it
+        # sends any light in (_lit).
+        (x_from, x_to), (y_from, y_to) = self._lit()
+
+        def window(p, low, high, first, count):
+            a, b = p + self.depth * low, p + self.depth * high
+            lo = np.clip(np.floor(np.minimum(a, b) / pitch + size / 2), first, first + count).astype(np.int64)
+            hi = np.clip(np.ceil(np.maximum(a, b) / pitch + size / 2) + 1, first, first + count).astype(np.int64)
+            return lo, hi - lo
+
+        lo_x, nx = window(px, x_from, x_to, ox, tw)
+        lo_y, ny = window(py, y_from, y_to, oy, th)
+        none = (nx == 0) | (ny == 0)
+        nx[none] = ny[none] = 0
+        self._window = lo_x, lo_y, nx, ny
+        # The cells of the tile each window touches: its first, and how
+        # many across and down; and the points in runs of at most _PAIRS
+        # cells in all (first, last + 1), each run a launch (see light).
+        first_x, first_y = (lo_x - ox) // _CELL, (lo_y - oy) // _CELL
+        across = np.where(none, 0, (lo_x + nx - 1 - ox) // _CELL - first_x + 1)
+        down = np.where(none, 0, (lo_y + ny - 1 - oy) // _CELL - first_y + 1)
+        before = np.concatenate([[0], np.cumsum(across * down)])
+        self._runs, first = [], 0
+        while before[first] < before[-1]:
+            last = max(first + 1, int(np.searchsorted(before, before[first] + _PAIRS, "right")) - 1)
+            self._runs.append((first, last))
+            first = last
         up = lambda a, t: cp.asarray(np.ascontiguousarray(a, t))
-        self._args = (
-            i32(len(px)), up(start, i32), up(lo_x, i32), up(lo_y, i32), up(nx, i32), up(ny, i32),
-            up(px, f32), up(py, f32), up(self.depth, f32),
-        )
+        self._cells = tuple(up(a, np.int64) for a in (first_x, first_y, across, down))
+        self._where = up(px, np.float32), up(py, np.float32), up(self.depth, np.float32)
+
+    def _lit(self):
+        """The directions each point sends any light in, as tangents: from
+        and to, along x and along y. Many points send none over much of
+        the cone: they face away, or something is in front. Each map says
+        where: a direction more either side, since the map is blended
+        between directions, and out to the edge where the map's rim is
+        lit, as it is the rim's brightness that fades out past the cone."""
+        n = self.maps.shape[1]
+        spans = []
+        for axis in (1, 2):
+            lit = cp.asnumpy(self.maps.max(axis=axis) > 0)
+            first = lit.argmax(axis=1) - 1
+            last = n - lit[:, ::-1].argmax(axis=1)
+            at = lambda i: -self.cone + 2 * self.cone * i / (n - 1)
+            spans.append((np.where(first <= 0, -self.edge, at(first)), np.where(last >= n - 1, self.edge, at(last))))
+        return spans
+
+    def _lists(self, first, last):
+        """For the points from `first` up to `last`, the lists seen_gather
+        wants (on the GPU, and made there): how many cells the tile is
+        across, where each cell's list starts, and the lists, one after
+        another."""
+        ox, oy, tw, th = self.tile
+        cells_x, cells_y = -(-tw // _CELL), -(-th // _CELL)
+        first_x, first_y, across, down = (a[first:last] for a in self._cells)
+        px, py, depth = (a[first:last] for a in self._where)
+        # Every cell of every window: which point's, and which cell.
+        cells = across * down
+        ends = cp.cumsum(cells)
+        index = cp.arange(int(ends[-1]), dtype=cp.int64)
+        who = cp.searchsorted(ends, index, side="right")
+        index -= (ends - cells)[who]
+        x = first_x[who] + index % across[who]
+        y = first_y[who] + index // across[who]
+        del index
+        # Not those wholly outside the point's disc of light, at the
+        # window's corners.
+        middle_x = (px / self.pitch + self.size / 2 - 0.5 - ox)[who]
+        middle_y = (py / self.pitch + self.size / 2 - 0.5 - oy)[who]
+        off_x = cp.maximum(0, cp.maximum(x * _CELL - middle_x, middle_x - (x * _CELL + _CELL - 1)))
+        off_y = cp.maximum(0, cp.maximum(y * _CELL - middle_y, middle_y - (y * _CELL + _CELL - 1)))
+        reach = (self.edge * cp.abs(depth) / self.pitch + 1)[who]
+        keep = off_x * off_x + off_y * off_y <= reach * reach
+        del middle_x, middle_y, off_x, off_y, reach
+        # Sorted by cell, then by point.
+        count = len(self.depth)
+        key = cp.sort(((y * cells_x + x) * count + (who + first))[keep])
+        del x, y, who, keep
+        start = cp.searchsorted(key // count, cp.arange(cells_x * cells_y + 1, dtype=cp.int64))
+        return cells_x, start.astype(cp.int32), (key % count).astype(cp.int32)
 
     def _phase(self, phases):
         return cp.asarray(((self.k * self.depth + phases) % (2 * math.pi)).astype(np.float32))
@@ -510,34 +602,51 @@ class SeenPoints:
         """Their light on the plate (on the GPU), each starting with its
         phase. With `into` (an array and the pixel its corner is at, x
         then y), the light is added to that array instead, which must
-        hold the whole tile."""
-        ox, oy, tw, th = self.tile
+        hold the whole tile.
+
+        Each pixel adds up the points that reach it (seen_gather). The
+        sum is compiled with CUDA's fast math, whose sines, square roots
+        and divisions are a little less exact: nearly twice as fast, for
+        a difference in the plate's light of 5 parts in 100,000."""
+        tx, ty, tw, th = self.tile
         if into is None:
-            light = cp.zeros((th, tw), cp.complex64)
+            light, ox, oy = cp.zeros((th, tw), cp.complex64), tx, ty
         else:
             light, ox, oy = into
-            tw = light.shape[1]
         f32, i32 = np.float32, np.int32
-        if self.blocks == 0:
-            return light
-        _kernel("seen_many")(
-            (self.blocks,), _BLOCK,
-            (light, i32(self.size), i32(ox), i32(oy), i32(tw), f32(self.pitch), f32(self.k), f32(self.cone), f32(self.edge),
-             *self._args, self._phase(phases), self.maps, np.int32(self.maps.shape[1])),
-        )
+        phase = self._phase(phases)
+        for first, last in self._runs:
+            cells_x, start, points = self._lists(first, last)
+            _kernel("seen_gather", fast=True)(
+                _blocks(tw, th), _BLOCK,
+                (light, i32(self.size), i32(ox), i32(oy), i32(light.shape[1]), i32(tx), i32(ty), i32(tw), i32(th),
+                 f32(self.pitch), f32(self.k), f32(self.cone), f32(self.edge),
+                 i32(_CELL), i32(cells_x), start, points, *self._where, phase, self.maps, i32(self.maps.shape[1])),
+            )
+            del start, points
         return light
 
     def reverse(self, grad):
         """For each point, its light on the plate without its own phase,
         conjugated, times `grad` (on the GPU), summed."""
-        count = int(self._args[0])
+        count = len(self.depth)
         out = cp.zeros(2 * count, cp.float32)
         ox, oy, tw, th = self.tile
+        # Each window in tiles of a block, one after another (see
+        # tile_pixel).
+        lo_x, lo_y, nx, ny = self._window
+        start = np.concatenate([[0], np.cumsum(-(-nx // _BLOCK[0]) * -(-ny // _BLOCK[1]))])
+        if start[-1] >= 2**31:
+            raise ValueError("too many tiles for one launch")
+        if start[-1] == 0:
+            return np.zeros(count, complex)
         f32, i32 = np.float32, np.int32
+        up = lambda a: cp.asarray(np.ascontiguousarray(a, i32))
         _kernel("seen_reverse_many")(
-            (self.blocks,), _BLOCK,
+            (int(start[-1]),), _BLOCK,
             (grad, i32(self.size), i32(ox), i32(oy), i32(tw), f32(self.pitch), f32(self.k), f32(self.cone), f32(self.edge),
-             *self._args, self._phase(np.zeros(count)), self.maps, np.int32(self.maps.shape[1]), out),
+             i32(count), up(start), up(lo_x), up(lo_y), up(nx), up(ny), *self._where,
+             self._phase(np.zeros(count)), self.maps, i32(self.maps.shape[1]), out),
         )
         out = cp.asnumpy(out)
         return out[0::2] + 1j * out[1::2]

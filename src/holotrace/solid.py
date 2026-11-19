@@ -92,11 +92,9 @@ def wall(z=WALL_Z, half=WALL_HALF, light=1.0, dark=0.25, spacing=SPACING, check=
 
 def scene():
     """The scene as Mitsuba sees it, for working out what hides what."""
-    import mitsuba as mi
-
     from .mesh import _mitsuba
 
-    _mitsuba()
+    mi = _mitsuba()
     wall_at = mi.ScalarTransform4f().translate([0, 0, WALL_Z]).scale([WALL_HALF, WALL_HALF, 1])
     return mi.load_dict(
         {
@@ -146,7 +144,15 @@ def maps(world, points, normals, albedo, gloss, chunk=4000, shadows=True):
     rest in shadow, or with shadows off all of it wherever it faces the
     light; a little ambient light everywhere; and a highlight where
     glossy) times how much of it faces that way, or nothing where it
-    faces away or something is in front of it."""
+    faces away or something is in front of it.
+
+    A chunk of points at a time, each with every direction: a million
+    rays or more a chunk, so the shading is worked out where the rays
+    are traced, on Mitsuba's arrays (Dr.Jit, on every core), not in
+    NumPy, where it took five times as long as the rays themselves."""
+    import drjit as dr
+    import mitsuba as mi
+
     o = OPTICS
     m = o.directions
     t = np.linspace(-o.cone, o.cone, m)
@@ -173,15 +179,24 @@ def maps(world, points, normals, albedo, gloss, chunk=4000, shadows=True):
             clear = ~_blocked(world, origins, np.tile(rays, (len(idx), 1)))
             lit[idx] = clear.reshape(len(idx), len(rays)).mean(axis=1)
         diffuse = a * (AMBIENT + (1 - AMBIENT) * np.maximum(n @ LIGHT, 0) * lit)
-        highlight = g[:, None] * lit[:, None] * np.maximum(n @ half.T, 0) ** SHINE
+
+        # Every point with every direction: what belongs to a point
+        # repeated for each direction, and to a direction for each point.
+        def each(per_point):
+            return dr.repeat(mi.Float(np.ascontiguousarray(per_point, np.float32)), m * m)
+
+        def every(per_direction):
+            return dr.tile(mi.Float(np.ascontiguousarray(per_direction, np.float32)), len(p))
+
+        normal = mi.Vector3f(*(each(c) for c in n.T))
+        toward = mi.Vector3f(*(every(c) for c in d.T))
         # Seen, or facing away or hidden.
-        facing = n @ d.T
-        ok = facing > 0
-        rows, cols = np.nonzero(ok)
-        seen = ok.copy()
-        seen[rows, cols] = ~_blocked(world, p[rows] + lift * n[rows], d[cols])
-        power = (diffuse[:, None] + highlight) * np.maximum(facing, 0)
-        out[s : s + chunk] = np.where(seen, np.sqrt(power), 0)
+        facing = dr.dot(normal, toward)
+        origin = mi.Point3f(*(each(c) for c in (p + lift * n).T))
+        seen = (facing > 0) & ~world.ray_test(mi.Ray3f(o=origin, d=toward), active=facing > 0)
+        shine = dr.maximum(dr.dot(normal, mi.Vector3f(*(every(c) for c in half.T))), 0)
+        power = (each(diffuse) + each(g * lit) * dr.power(shine, SHINE)) * facing
+        out[s : s + chunk] = np.array(dr.select(seen, dr.sqrt(power), 0)).reshape(len(p), m * m)
     return out.reshape(len(points), m, m)
 
 
@@ -459,7 +474,9 @@ def seen_maps(path, world, points, normals, albedo, gloss, shadows=True):
     leaves memory for carrying the plate's light). They are kept in the
     file at `path` and read back from it when the points, their surfaces
     and the cone are the same, as Mitsuba's answer would be: it takes
-    minutes. (The scene Mitsuba sees is taken to go with the points.)"""
+    minutes. (The scene Mitsuba sees is taken to go with the points:
+    `world` makes it, and is called only if the maps are not kept, so
+    that a rerun does without Mitsuba altogether.)"""
     import hashlib
 
     o = OPTICS
@@ -472,7 +489,7 @@ def seen_maps(path, world, points, normals, albedo, gloss, shadows=True):
             if str(kept["key"]) == key:
                 print(f"brightness maps read back from {path}", flush=True)
                 return kept["alive"], kept["light"]
-    light = maps(world, points, normals, albedo, gloss, shadows=shadows)
+    light = maps(world(), points, normals, albedo, gloss, shadows=shadows)
     alive = light.max(axis=(1, 2)) > 0
     light = light[alive]
     np.savez(path, key=key, alive=alive, light=light)
@@ -482,8 +499,9 @@ def seen_maps(path, world, points, normals, albedo, gloss, shadows=True):
 def render(name, parts, world, focus, plate_size=PLATE["size"], shadows=True):
     """Makes the hologram of a scene and the eye's views of it, into
     out/<name>: `parts` maps a name to each part's points, normals,
-    albedo and gloss (see ball and wall), `world` is the scene as Mitsuba
-    sees it, and `focus` maps a name to each depth the eye focuses at.
+    albedo and gloss (see ball and wall), `world` makes the scene as
+    Mitsuba sees it (see seen_maps), and `focus` maps a name to each
+    depth the eye focuses at.
     The plate is `plate_size` pixels square, as OPTICS has it, summed a
     tile at a time, through recording planes (sum_planes), and kept as
     the eye can see it; too big for memory, it is summed plane to plane
@@ -554,4 +572,4 @@ def render(name, parts, world, focus, plate_size=PLATE["size"], shadows=True):
 
 
 def main():
-    render("solid", {"ball": ball(), "wall": wall()}, scene(), FOCUS)
+    render("solid", {"ball": ball(), "wall": wall()}, scene, FOCUS)

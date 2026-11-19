@@ -86,7 +86,7 @@ class Scene:
         maps = solid.maps(solid.scene(), points, normals, albedo, gloss)
         alive = (maps.max(axis=(1, 2)) > 0) & (np.abs(points[:, 2]) >= NEAREST)
         self.points = points[alive][:limit]
-        self.maps = cp.asarray(maps[alive][:limit])
+        self.maps = cp.asarray(maps[alive][:limit], cp.float32)
         self._seen = SeenPoints(**PLATE, points=self.points, maps=self.maps, cone=CONE)
 
     def __len__(self):
