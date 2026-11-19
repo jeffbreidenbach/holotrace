@@ -141,13 +141,24 @@ surfaces send on, after as many as four bounces.
   lamp reaches it, and 1% where only the sky does. It adds no grain
   that can be measured: on the 2 cm boat with points 32 µm apart, the
   contrast under a 0.02 rad lamp was 0.270 by rule and 0.258 traced
-  (§8.4's measure).
+  (§8.4's measure); on the 4 cm boat and its wall (§6.4), 0.297 and
+  0.296.
 - **Cost:** about 47 µs a point more in the maps step. The 2 cm boat's
   1.9 million points take 120 s instead of 30 s; the 4 mm boat's
-  170,000 take 11 s instead of 3 s. The sum is not touched.
+  170,000 take 11 s instead of 3 s. The 4 cm boat and wall's 5.0
+  million take 240 s instead of 78 s, of a run of 46 minutes. The sum
+  is not touched.
 - **What it changes** in this scene is modest: corners and the shadowed
   side get the light they would, not a fixed share, and the views are 4
-  to 6% brighter from light bounced between surfaces.
+  to 6% brighter from light bounced between surfaces. On the 4 cm boat
+  and wall, seen straight on under a 0.02 rad lamp and smoothed over
+  300 µm, the view as a whole is 3% brighter. Its brightest tenth, the
+  lit boat, is 10% brighter, and a twentieth of that by more than 27%:
+  the deck around the cabin and the chimney's shaded side, which the
+  lit surfaces beside them light. Its darkest tenth, the boat's shadow
+  on the wall, is 8% darker, most where the wall is nearest the hull:
+  the boat hides part of the sky there, and by rule the ambient light
+  is the same everywhere.
 - **What is still by rule:** the highlight, and so anything whose
   brightness changes with the direction it is seen from. Tracing that
   would take paths for each of a point's 1,024 directions, not one set
