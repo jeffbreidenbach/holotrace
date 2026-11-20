@@ -9,11 +9,11 @@ manuals as other sites publish them (linked at the end).
 1. Learn how a hologram gets into the machine: which file, on which
    pixels.
 2. Write the chrome test plate.
-3. Write a relief test plate.
-4.  Bring home numbers: how wide the lines came out, how deep the
+3. Write rgw relief test plate.
+4. Bring home numbers: how wide the lines came out, how deep the
    levels.
 
-The boat at its printed size (a 68.8 mm plate, 6.5 to 24 hours of
+The full size hologram (a 68.8 mm plate, 6.5 to 24 hours of
 writing by the manuals' rates) is for a later visit.
 
 ## Ask before going
