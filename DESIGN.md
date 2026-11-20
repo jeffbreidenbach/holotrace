@@ -33,6 +33,10 @@ has as many points (not timed as a whole). With a
 checkered wall behind the boat that looks endless from every angle
 (§6.5) it takes 46 min, path traced.
 
+A 9.8 cm plate whose fringes are coarse enough for a laser writer (2 µm
+apart at their finest, the light within ±7°) takes 5.5 min, and its
+pattern on the writer's pixels 2 min more (§6.6).
+
 ## 2. Conventions
 
 Anyone changing the code needs these.
@@ -46,7 +50,7 @@ Anyone changing the code needs these.
 | Reference beam | Given as a sine (`Optics.reference`), tilted in y. |
 | Phases | Each point gets a random starting phase from `np.random.default_rng(1)`, so runs are repeatable. |
 | Kept light | What is stored is not the full-resolution plate but the scene's light at the plate, sampled every `Optics.keep` pixels (`kept_pitch`). See §5.2. |
-| Spectrum file | `out/NAME/spectrum.npy` is the **unshifted 2D FFT** of the kept light. It is stored either whole, shape (n, n), or in blocks of columns, shape (n/B, n, B) with B = 512 (§6.4). `spectrum.json` beside it holds `pitch`, `cone` and `reference`. `viewer.Look` reads both layouts. |
+| Spectrum file | `out/NAME/spectrum.npy` is the **unshifted 2D FFT** of the kept light. It is stored either whole, shape (n, n), or in blocks of columns, shape (n/B, n, B) with B = 512 (§6.4). `spectrum.json` beside it holds `pitch`, `cone`, `reference` and the plate's `pixel` (which `encode.py` writes its pattern on, §6.6). `viewer.Look` reads both layouts. |
 | Global settings | `solid.OPTICS` is a module-level `Optics`; `benchy.py` replaces it from the command line. Code that needs it reads `solid.OPTICS` at call time (`planes.py` does too). |
 
 ## 3. The pipeline
@@ -713,6 +717,226 @@ million of them seen at all.
 - **Its light lands beyond the plate,** which is what steps 12 and 13 of
   §6.4 are for.
 
+### 6.6 A plate for a laser writer, and its pattern (`encode.py`)
+
+A laser writer's finest lines are about 1 µm, so its plate has a narrow
+cone again. `benchy --scale 48 --spacing 64 --pixel 0.4 --cone 7` makes
+a 98.3 mm plate, 245,760² pixels 0.4 µm apart, the boat 8 cm long: the
+scene's light within ±7°, the reference beam at 11.6° (`Optics.wide`),
+so fringes from 1.96 to 7.9 µm apart. Its light is kept every 2.4 µm,
+40,960² samples: a quarter of what the 4 cm plate at ±35° keeps. On
+NVMe:
+
+| Step | Time |
+|---|---|
+| The boat's surface as 4.26 million points, 64 µm apart | 84 s |
+| Path-traced maps; 1.78 million points seen | 124 s (with a short test running beside it) |
+| The sum, plane to plane: 59 slabs, one group | 113 s |
+| The preview | 4 s |
+| The whole run | 5.5 min; 20.6 GB of memory at most; the spectrum 8.6 GB on disk |
+
+Two things failed at this width, both in the viewer, both for want of
+GPU memory:
+
+- **The run's preview.** `Look.view` covers the whole plate, four
+  samples across to each of the spectrum's that the pupil reaches:
+  25,000² samples for the preview's pupil of 0.04. The preview's pupil
+  is now the widest the GPU holds a view for (`Look.widest_pupil`: 0.020
+  for this plate), and `holotrace view` and `compare` narrow theirs the
+  same way.
+- **The real eye's view.** From 60 cm, `eye_view`'s 5 × 5 cells were
+  19,200² samples each. It now takes as many cells as it needs for the
+  GPU to hold one (8 × 8 here for an eye on the axis, 12,288² each):
+  17–24 s a view. Plates up
+  to 4 cm seen from 30 cm are done as before (their cells are 7,200²
+  samples, 8,640² by lamp light).
+
+**The pattern.** A run keeps the plate's light as the eye can see it,
+without the reference beam (§5.2); a writer needs the pattern on its
+own pixels. `holotrace encode NAME` transforms the spectrum back to the
+plate's light (a scratch file on disk, as big as the spectrum whole),
+makes it as fine as the pixels a tile at a time on the GPU (the tile's
+transform padded with zeros), and sets each pixel against the reference
+beam. The files are plain pictures of the plate, PBM and PGM:
+
+- **Chrome on glass** (clear or opaque): clear where
+  cos θ > sqrt(1 − a²), θ the light's phase against the beam's and a
+  its strength thereabouts, 1 where the plate is brightest. The fringes
+  are half clear where the light is brightest, thinner where it is
+  dimmer, gone in the dark.
+- **A relief in resist** (`--levels`, 256 of them): how long each pixel
+  holds the light back. That is the light's phase against the beam's, a
+  sawtooth across each fringe, made shallower where the light is weak:
+  a sawtooth m of a wave deep sends on sinc(1 − m) of the light.
+
+For the 98.3 mm plate, on 0.4 µm pixels:
+
+| | Time | File |
+|---|---|---|
+| The plate's light from its spectrum (12.5 GB of scratch) | 53–57 s | |
+| Clear or opaque | 71 s | 7.0 GB |
+| 256 levels | 104 s | 56 GB |
+
+- **Tiles' margins.** A tile's light made finer is off near its edges,
+  so 64 kept samples either side are worked out and thrown away. A tile
+  made with that margin differed from the same tile made with a margin
+  seven times as wide by 0.29% of the light (rms), 0.45% within 8 kept
+  samples of its edge.
+- **Read back.** A 4.9 mm plate's two files, read back, lit by the
+  reference beam and viewed, show the boat as the scene's own light
+  does (a prototype, not in the code): the files are laid out as
+  `encode.py` says.
+
+**The light's strength has to be in the pattern.** The scene stands at
+the plate, so how bright each part of it looks is how strong the light
+is there. The first version made every fringe half clear, whatever the
+light's strength, and on one tile at the plate's middle that looked
+good: 7.4% of the beam became the scene's light. Over a whole plate it
+is useless. Viewed, a 4.9 mm plate with the same optics showed the boat
+as a flat shape in a haze, and so did a relief of the light's phase
+alone. Replayed over that whole plate (a prototype, each pixel a point;
+other light within the cone as a share of the scene's, as drawn and as
+a 0.8 µm spot would write it):
+
+| Pattern | Other light | With the spot |
+|---|---|---|
+| Chrome, every fringe half clear | 276% | 279% |
+| The same, opaque where the light thereabouts is under a tenth of the brightest | 30% (still a flat shape) | 31% |
+| Chrome, fringes as wide as each pixel's own light is strong (`speckle.py`) | 26% | 72% |
+| Chrome, fringes as wide as the light thereabouts is strong (the code's) | 26% | 41% |
+| Relief, the light's phase alone | 267% | 272% |
+| Relief, shallower where each pixel's own light is weak (the code's) | 7% | 7% |
+| Relief, shallower where the light thereabouts is weak | 14% | 16% |
+
+The strength thereabouts is the light's mean power over 8 × 8 kept
+samples, smoothed over the cells next to it. Each pixel's own strength
+follows the light better, speckle and all, but as line widths it asks
+for lines too thin to write wherever the speckle is dim; as depths it
+asks nothing a spot cannot give.
+
+**Replayed** (`encode NAME --check`): both patterns over up to a hundred
+tiles spread across the plate, each pixel a square on a grid no coarser
+than 0.2 µm, lit by the reference beam. How much of the beam becomes
+the scene's light (most of this plate is dark), and how much other
+light comes out within the cone, as a share of the scene's:
+
+| Pixels | Chrome | Written with a 0.8 µm spot | Relief | Written with a 0.8 µm spot |
+|---|---|---|---|---|
+| 0.8 µm | 0.84%, 55% | 0.75%, 59% | 4.2%, 16% | 2.0%, 19% |
+| 0.4 µm | 1.07%, 24% | 0.72%, 48% | 5.3%, 6% | 2.3%, 7% |
+| 0.2 µm | 1.13%, 21% | 0.81%, 40% | 5.6%, 5% | 2.3%, 5% |
+
+The spot is a guess at a writer's, not a measurement of one: a Gaussian
+0.8 µm wide at half its height, the chrome clear where it gets half the
+full dose or more, the relief as deep as its dose. The check takes
+1.5 min after the plate's light.
+
+- **A relief is five times as bright as chrome and far cleaner** (three
+  times as bright, written with the spot), and the spot costs it
+  brightness, not cleanness. Chrome's thin fringes, where the scene is
+  dim, are what the spot spoils.
+- **Pixels half as wide as the finest line are about fine enough.** The
+  fringes' places carry the scene, so the pixels must be finer than the
+  lines: 0.8 µm pixels more than double the other light. 0.2 µm pixels
+  help chrome a little (48% to 40% with the spot) for four times the
+  file.
+- **Much of the other light is the pattern's second order.** A pattern
+  that is not the light itself also sends out light with twice the
+  scene's phase, spread twice as wide, about the mirror image of the
+  reference beam's direction. With the beam only just outside the cone
+  (`Optics.wide`) that overlaps the cone, and shows as a faint second
+  outline in the views. On the 4.9 mm plate, 0.2 µm pixels, moving the
+  beam out to three times the cone's sine took the relief's other light
+  from 5% to 0% and chrome's from 19% to 12%; but the fringes are then
+  1.3 µm apart at their finest, and written with the 0.8 µm spot chrome
+  was at 80%.
+- **A narrower cone is cleaner.** A 4.1 mm plate at ±4.5° (fringes
+  2.7 µm apart at their finest): chrome 15%, 20% with the spot; relief
+  2% either way.
+
+**Wide plates go through the same code,** as an electron-beam writer
+would need. After the viewer's changes the 2 cm plate at ±35° was made
+afresh in 236 s (234 s before). Its pattern on its own 0.25 µm pixels
+took 14 s (0.78 GB), after about a minute for the plate's light. The
+4 cm plate's pattern (163,840² pixels, 3.1 GB) took 9.6 min, 7.3 of
+them the plate's light: its 51 GB spectrum read from the SATA disk into
+54 GB of scratch on NVMe. Replayed, the 2 cm plate's 0.25 µm pixels are
+too coarse for fringes 0.52 µm apart: chrome's other light is 81% of
+the scene's, the relief's 25%. With `--pixel 0.125` they are 32% and
+11%.
+
+Nothing has been printed. No writer has been given these files, so
+their format is a first guess, and the views are still of the scene's
+light, not of the pattern's (§9).
+
+### 6.7 The boat at its printed size, and plates to try a writer on (`testplate.py`)
+
+The printed boat is 60 mm long (its file is 60 × 31 × 48 mm). For a
+writer whose finest lines are 0.9 µm wide, fringes may be 1.8 µm apart
+at their finest, which by `Optics.wide` lets the scene's light spread
+±7.8°, the reference beam at 12.5°:
+
+`benchy --plate 68.8128 --scale 35.2947 --spacing 48 --pixel 0.3 --cone 7.8`
+
+The pixels are a third of the finest line, the light is kept every
+2.1 µm (32,768² samples), and the plate is 68.8 mm wide, as much wider
+than the boat as the first plate was. (The boat's light reaches 31.7 mm
+to the side of the plate's middle and 26.7 mm up and down, so 63.5 mm
+would hold it.) On NVMe:
+
+| | Time | |
+|---|---|---|
+| The hologram: 4.09 million points 48 µm apart, 1.74 million seen | 4.5 min | 14.8 GB of memory at most |
+| The plate's light from its spectrum (8.6 GB of scratch) | 21–27 s | |
+| Chrome, 229,376² pixels, as a picture (PBM) | 56 s | 6.1 GB |
+| The same as rectangles (GDSII, `encode --gds`) | 166 s | 576 million of them, 34 GB |
+| Relief, 256 levels (PGM) | 85 s | 49 GB |
+
+Replayed (`--check --spot 0.9`, 100 tiles): chrome turns 1.18% of the
+beam into the scene's light, with other light 23% of that; written with
+a 0.9 µm spot, 0.67% and 59%. The relief: 5.8% and 6%; with the spot,
+1.9% and 8%.
+
+- **GDSII** is what mask writers' software takes: `encode --gds` writes
+  the clear pixels as rectangles, each run of them along a row, runs
+  alike in rows one above another joined. A 4.9 mm plate's file, read
+  back by a separate reader and painted, gave the PBM's pixels exactly
+  (1.96 million rectangles, 151 million pixels). At 64 bytes a
+  rectangle a whole plate's file is 34 GB; whether any writer's
+  software takes one that big has not been tried.
+- **A plate's width, rounded.** A width that was a whole number of kept
+  pixels could come out one more: 68.8128 mm gave 229,383 pixels, not
+  229,376. `benchy` now rounds up from a hair less.
+
+**Test plates.** What the replays above cannot say is what a writer
+does with lines thinner than its finest, which is how chrome shows the
+dim parts of a scene, or how deep each of a relief's levels comes out.
+`holotrace testplate` writes two small plates to find out, each thing
+on them named beside it (`layout.txt` says what and where):
+
+- **Chrome** (28.9 × 16.2 mm; PBM 0.6 GB; GDSII 22.9 million
+  rectangles, 1.4 GB):
+  - twelve gratings 1.9 mm square, lines from 0.6 to 2.4 µm wide and as
+    far apart, lying and standing. A grating whose lines came out as
+    wide as its gaps sends a tenth of a laser's light (1/π²) into each
+    first order and none into the second.
+  - twenty ladders 1 mm square: lines from 0.3 to 1.5 µm wide, 3.6 and
+    7.2 µm from one to the next, clear on chrome and chrome on clear.
+    Lines w wide, P apart send sin²(πw/P)/π² into a first order, which
+    says how wide each came out.
+  - three holograms of the boat, 8.6 mm wide: as `encode` makes it; with
+    every fringe half clear (`--bold`), which has no thin lines and
+    shows the boat flat; and with the light within ±5°, its fringes
+    coarser.
+- **Relief** (27.9 × 16.2 mm; PGM 4.8 GB): a staircase of sixteen
+  levels from 0 to 255 in squares 1 mm wide; twelve sawtooth gratings,
+  teeth from 1.8 to 9.6 µm wide, a whole wave deep, lying and standing
+  (one with sharp teeth of the right depth sends all its light into one
+  first order); and two holograms, at ±7.8° and ±5°.
+
+Both take 53 s, after a minute for the holograms the first time.
+Nothing has been printed.
+
 ## 7. The viewer (`viewer.py`)
 
 `Look` holds the spectrum and makes views.
@@ -722,7 +946,8 @@ million of them seen at all.
   focused `depth` behind the plate. It takes the spectrum patch in the
   pupil, applies the propagation phase back to the focus plane, and
   inverse-FFTs the patch, padded 2× so the view is smooth. One view covers
-  the whole plate.
+  the whole plate, so a wide plate needs a narrower pupil for the GPU to
+  hold it (`widest_pupil`, §6.6).
 - **`eye_view(eye, pupil_radius, depth)`**: a real eye at a finite
   distance, which sees each point along its own line to the eye.
   - **Method.** Light headed for the pupil's middle from all over the
@@ -731,7 +956,8 @@ million of them seen at all.
     from the eye, brings the waves the pupil takes in to about straight
     on everywhere, so one filter (the pupil) serves every point. This is
     what the eye's lens does.
-  - **Cells.** The plane is done in up to 5 × 5 cells, each made from
+  - **Cells.** The plane is done in up to 5 × 5 cells (more for a plate
+    too wide for the GPU to hold a cell, §6.6), each made from
     the spectrum patch about the direction from its middle to the eye,
     wide enough for the whole cell, its border and every lamp direction.
     Cells overlap by an eighth and are cross-faded.
@@ -898,9 +1124,11 @@ both, from two eye positions 30 cm away:
 
 - **An ideal plate.** Views assume the plate records the light exactly.
   A printed plate has finite pixels and few levels, often binary.
-  Encoding adds scattered noise and costs brightness; that is not yet
-  simulated for the large plates. `speckle.py` contains a binary encoding
-  (clear where cos θ > sqrt(1 − a²)) that can be reused.
+  Encoding adds scattered light and costs brightness. `holotrace encode`
+  writes the pattern and replays it (§6.6): beside the scene's light a
+  chrome plate sends other light a quarter as strong into the cone,
+  half as strong if written with a 0.8 µm spot; a relief in resist a
+  sixteenth. Views of the pattern itself are made only in a prototype.
 - **Speckle** in laser light (§8). The lamp reduces it in viewing only.
 - **Simple materials:** a single white plastic: matte, a little ambient,
   one glossy highlight, one disc light. The boat's matte light is path
@@ -928,7 +1156,7 @@ both, from two eye positions 30 cm away:
 
 | File | Role |
 |---|---|
-| `__init__.py` | Command-line entry: `holotrace check / magnifier / mesh / solid / benchy / view / compare / speckle / gpucheck`. |
+| `__init__.py` | Command-line entry: `holotrace check / magnifier / mesh / solid / benchy / view / compare / encode / testplate / speckle / gpucheck`. |
 | `magnifier.py` | Step 1: dots behind an analytic lens; shared constants (`WAVELENGTH`, `PLATE`, `CONE`, `REFERENCE`, `PUPIL`) and image helpers. |
 | `lens.py`, `plate.py`, `eye.py` | The analytic lens with exact ray aiming; the CPU plate (reference implementation); the far-away eye of the early steps. |
 | `mesh.py`, `meshed.py` | Step 2: the lens as a Mitsuba mesh; Mitsuba setup (`_mitsuba`, which picks a variant the card supports). |
@@ -939,6 +1167,8 @@ both, from two eye positions 30 cm away:
 | `planes.py` | Plane-to-plane sum for plates too big for memory (§6.4). |
 | `benchy.py` | The boat: `--scale`, `--spacing`, `--turn`, `--plate`, `--pixel`, `--cone`, `--slab`, `--wall`, `--rule`. |
 | `viewer.py` | `Look` (views from the spectrum), light sources (`LASER`, `LED`, `lamp`), movies, `compare`. |
+| `encode.py` | The plate's pattern on a writer's pixels, clear or opaque (a picture, or a GDSII file) or in 256 levels, and a replay of it (§6.6, §6.7). |
+| `testplate.py` | Two small plates to try a writer on: gratings, ladders of thin lines, a staircase of levels, small holograms (§6.7). |
 | `speckle.py` | Parked phase optimization against speckle (§8.1). |
 
 Output names encode the settings, for example
@@ -958,6 +1188,17 @@ uv run --extra gpu holotrace benchy --plate 40.96 --scale 16 --spacing 32 --pixe
 #   add --wall for the endless wall: 46 min, up to 174 GB of disk while running
 #   add --rule for the light by rule, not path traced (§3.1): quicker, and how the
 #   11 min above was measured
+uv run --extra gpu holotrace benchy --scale 48 --spacing 64 --pixel 0.4 --cone 7
+#   a 9.8 cm plate for a laser writer (§6.6): 5.5 min, 21 GB of memory
+uv run --extra gpu holotrace encode benchy-98.304mm-64um-7deg-0.4um
+#   its pattern, clear or opaque: 2 min, 7 GB (--levels for 256 levels: 2.7 min, 56 GB;
+#   --check to replay both: 2.5 min)
+uv run --extra gpu holotrace benchy --plate 68.8128 --scale 35.2947 --spacing 48 --pixel 0.3 --cone 7.8
+#   the boat at its printed size, 60 mm, for a writer whose finest lines are 0.9 um (§6.7): 4.5 min
+uv run --extra gpu holotrace encode benchy-68.8128mm-48um-7.8deg-0.3um-boat35.2947
+#   its pattern in chrome: 1.3 min, 6 GB (--levels: 1.8 min, 49 GB; --gds: 3.2 min, 34 GB)
+uv run --extra gpu holotrace testplate
+#   two small plates to try the writer on: 2 min
 uv run --extra gpu holotrace view benchy-40.96mm-32um-35deg-0.25um-boat16 --eye 300 --focus 0
 #   real-eye movie, laser: ~5 min
 uv run --extra gpu holotrace view benchy-40.96mm-32um-35deg-0.25um-boat16 --eye 300 --focus 0 --source 0.02
@@ -973,15 +1214,17 @@ hang (§3.1), not a fault.
 
 In the order recommended:
 
-1. **Simulate the printed plate.** Encode the 4 cm hologram tile by tile
-   to a printer's pixel size and levels, add the reference beam, and view
-   it with the same eye and lamp. This measures the encoding noise
-   against the remaining speckle. It also checks whether ±35° at 0.25 µm
-   is realistic: a coarser printer pixel forces a narrower cone, and that
-   decides the settings for every larger run.
+1. **View the printed plate.** `encode` writes the pattern and replays
+   it as numbers (§6.6); a prototype views a 5 mm plate's. Still to do:
+   view any plate's pattern with the same eye and lamp, to see the
+   encoding's other light against the remaining speckle; put a real
+   writer into the replay (its spot, its stripes), once one has been
+   measured; and choose the cone and the reference beam's angle by what
+   the pattern's second order does (§6.6).
 2. **Choose a real medium** (e-beam or laser lithography on chrome on
    glass, a service for computed holograms, a photoplotter). Its pixel
-   size and levels fix the optics.
+   size and levels fix the optics: §6.6 is a first guess at a laser
+   writer's, ±35° at 0.25 µm at an electron beam's.
 3. **Go bigger** (§6.4). It needs only disk: 10 cm at ±35° needs about
    500 GB. Not run, and not timed.
 4. **Richer scenes.** Mitsuba's path tracer works out the light

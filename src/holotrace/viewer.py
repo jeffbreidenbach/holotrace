@@ -61,6 +61,9 @@ from .solid import results
 # a source a few mm across, some meters off).
 LED = [(0.0, 0.0), (-0.008, 0.0), (0.008, 0.0), (0.0, -0.001), (0.0, 0.001)]
 LASER = [(0.0, 0.0)]
+# The most samples across that a view, or a cell of one, is made with:
+# what the GPU holds.
+MOST = 12288
 
 
 def lamp(across, count=7, offsets=(-0.008, 0.0, 0.008)):
@@ -111,6 +114,14 @@ class Look:
         # The reference beam's angle, as a sine.
         self.reference = REFERENCE / math.sqrt(1 + REFERENCE**2) if reference is None else reference
 
+    def widest_pupil(self):
+        """The widest pupil (numerical aperture) `view` can take, for a
+        plate this wide: a view is four samples across to each of the
+        spectrum's that the pupil reaches, and the GPU holds one MOST
+        across."""
+        shortest = WAVELENGTH + min(offset for offset, _ in self.light)
+        return (MOST // 4 - 2) * shortest / self.width
+
     @staticmethod
     def save(path, spectrum, optics):
         """Saves a spectrum (unless it is None: already in the file), and
@@ -118,7 +129,7 @@ class Look:
         made with (see solid.Optics)."""
         if spectrum is not None:
             np.save(path, spectrum)
-        info = {"pitch": optics.kept_pitch, "cone": optics.cone, "reference": optics.reference}
+        info = {"pitch": optics.kept_pitch, "cone": optics.cone, "reference": optics.reference, "pixel": optics.pixel}
         Path(path).with_suffix(".json").write_text(json.dumps(info))
 
     @classmethod
@@ -196,7 +207,9 @@ class Look:
         point. (This is what the eye's lens does.)
 
         The plane is done in `grid` x `grid` cells (as many as keep each
-        far wider than the eye's blur, up to 5), since near one point the
+        far wider than the eye's blur, up to 5; for a plate so wide that
+        the GPU cannot hold a cell's plane, as many more as it takes,
+        each still many times the blur's width), since near one point the
         light the pupil takes in from thereabouts is within a small patch
         of the spectrum: each cell's light, and a border's, is made from
         the patch about the direction from its middle to the eye, wide
@@ -209,11 +222,6 @@ class Look:
         ex, ey, distance = eye
         n, width, sine = self.n, self.width, self.reference
         far = distance + depth
-        if grid is None:
-            blur = WAVELENGTH * far / pupil
-            grid = int(max(1, min(5, width / (64 * blur))))
-        centers = (np.arange(grid) + 0.5) / grid * width - width / 2
-        reach = width / grid * 0.625  # half a cell and its border, an eighth of a cell
 
         def toward(x, y):
             """The eye's distance from (x, y) in the plane in focus, and
@@ -226,24 +234,39 @@ class Look:
             by_offset.setdefault(offset, []).append(tilt if isinstance(tilt, tuple) else (tilt, 0.0))
         shortest = WAVELENGTH + min(by_offset)
         widest = max(math.hypot(*t) for tilts in by_offset.values() for t in tilts)
-        # How far directions to the eye differ within a cell and its
-        # border, and the widest the pupil looks from any cell.
-        spread = aperture = 0.0
-        for qy in centers:
-            for qx in centers:
-                r, dx, dy = toward(qx, qy)
-                aperture = max(aperture, pupil / r)
-                for cx in (qx - reach, qx + reach):
-                    for cy in (qy - reach, qy + reach):
-                        _, ax, ay = toward(cx, cy)
-                        spread = max(spread, math.hypot(ax - dx, ay - dy))
-        m = int(math.ceil((aperture + spread + widest) / shortest * width)) + 2
-        m_spread = int(math.ceil(spread / shortest * width)) + 1
-        # The plane's samples: enough for the patch, and for what the
-        # sphere's phase moves it by; a whole number to a cell's eighth.
-        size = -(-(2 * (m + m_spread) + 2) // (8 * grid)) * 8 * grid
-        while cufft.next_fast_len(size) != size:
-            size += 8 * grid
+
+        def cells(grid):
+            """With `grid` cells a side: their middles, the widest the
+            pupil looks from any, and how many samples the patch of the
+            spectrum reaches either side, and the plane is across."""
+            centers = (np.arange(grid) + 0.5) / grid * width - width / 2
+            reach = width / grid * 0.625  # half a cell and its border, an eighth of a cell
+            # How far directions to the eye differ within a cell and its
+            # border, and the widest the pupil looks from any cell.
+            spread = aperture = 0.0
+            for qy in centers:
+                for qx in centers:
+                    r, dx, dy = toward(qx, qy)
+                    aperture = max(aperture, pupil / r)
+                    for cx in (qx - reach, qx + reach):
+                        for cy in (qy - reach, qy + reach):
+                            _, ax, ay = toward(cx, cy)
+                            spread = max(spread, math.hypot(ax - dx, ay - dy))
+            m = int(math.ceil((aperture + spread + widest) / shortest * width)) + 2
+            m_spread = int(math.ceil(spread / shortest * width)) + 1
+            # The plane's samples: enough for the patch, and for what the
+            # sphere's phase moves it by; a whole number to a cell's eighth.
+            size = -(-(2 * (m + m_spread) + 2) // (8 * grid)) * 8 * grid
+            while cufft.next_fast_len(size) != size:
+                size += 8 * grid
+            return centers, aperture, m, size
+
+        if grid is None:
+            blur = WAVELENGTH * far / pupil
+            grid = int(max(1, min(5, width / (64 * blur))))
+            while cells(grid)[3] > MOST and grid < width / (16 * blur):
+                grid += 1
+        centers, aperture, m, size = cells(grid)
         cell, border = size // grid, size // (8 * grid)
         crop = cell + 2 * border
         across = width * crop / size  # a cell and its border, um
@@ -419,6 +442,9 @@ def main():
         # An eye far away, looking along directions across and up and down,
         # as far as the light reaches past the pupil.
         pupil = _option("--pupil", 0.03)
+        if pupil > look.widest_pupil():
+            pupil = look.widest_pupil()
+            print(f"a plate this wide can be viewed through a pupil of at most {pupil:.4f}", flush=True)
         reach = cone - pupil
         sweep = np.concatenate([np.linspace(-reach, reach, 24), np.linspace(reach, -reach, 24)])
         shots = [((s, 0.0), focus, f"{light}, from {s:+.2f} rad side to side, focused {focus:.0f} um behind") for s in sweep]
@@ -446,7 +472,7 @@ def compare():
     for name in _names():
         for light, samples in LIGHTS.items():
             look = Look.load(results() / name / "spectrum.npy", samples)
-            view = look.view((0.0, 0.0), pupil, 0.0)
+            view = look.view((0.0, 0.0), min(pupil, look.widest_pupil()), 0.0)
             tiles.append((f"{name}, {light}", look.image(view, look.scale(view), "", width=600)))
     sheet(tiles, columns=2).save("out/compare.png")
     print("wrote out/compare.png")

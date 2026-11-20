@@ -635,14 +635,18 @@ def render(name, parts, world, focus, plate_size=PLATE["size"], shadows=True, tr
     print(f"its spectrum saved: {time.time() - start:.1f} s", flush=True)
 
     start = time.time()
+    # (Through a narrower pupil, if the plate is too wide for the GPU to
+    # hold a view through PUPIL: see Look.widest_pupil.)
+    pupil = min(PUPIL, look.widest_pupil())
     tiles = []
     for where, direction in VIEWS.items():
         for label, depth in focus.items():
-            view = look.view(direction, PUPIL, depth)
+            view = look.view(direction, pupil, depth)
             tiles.append((f"looking {where}, focused {label}", view))
     scale = look.scale(tiles[0][1])
     sheet([(t, look.image(v, scale, "")) for t, v in tiles]).save(out / "views.png")
-    print(f"eye's views: {time.time() - start:.1f} s; wrote {out}/views.png and spectrum.npy")
+    narrower = "" if pupil == PUPIL else f" (through a pupil of {pupil:.3f}, the widest for a plate this wide)"
+    print(f"eye's views{narrower}: {time.time() - start:.1f} s; wrote {out}/views.png and spectrum.npy")
 
 
 def main():

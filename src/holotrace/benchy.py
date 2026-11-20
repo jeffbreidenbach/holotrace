@@ -128,7 +128,9 @@ def main():
     focus = {k: scale * v for k, v in FOCUS.items()}
     # The plate, S times 2048 um across, in whole kept pixels.
     width = _option("--plate", 2.048 * scale) * 1000
-    size = o.keep * math.ceil(width / o.pixel / o.keep)
+    # (Less a hair, so that a width that is a whole number of them, but
+    # for rounding, is not taken for one more.)
+    size = o.keep * math.ceil(width / o.pixel / o.keep - 1e-9)
     name = f"benchy-{width / 1000:g}mm-{spacing:g}um{wide}"
     if "--plate" in sys.argv:
         name += f"-boat{scale:g}"

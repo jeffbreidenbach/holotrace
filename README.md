@@ -61,6 +61,10 @@ uv run --extra gpu holotrace benchy     # 3DBenchy, the 3D printing test boat
 uv run --extra gpu holotrace benchy --scale 5 --spacing 16   # a 1 cm plate, tiled, with recording planes
 uv run --extra gpu holotrace benchy --scale 10 --spacing 32  # a 2 cm plate: 40 s on an 8 GB GPU from 2016
 uv run --extra gpu holotrace benchy --scale 20 --spacing 40  # a 4 cm plate: about 2 min, 7 GB of memory
+# A plate for a laser writer: 0.4 um pixels, the scene's light within 7 degrees, fringes no finer than 2 um.
+uv run --extra gpu holotrace benchy --scale 48 --spacing 64 --pixel 0.4 --cone 7   # a 9.8 cm plate: 5.5 min, 21 GB of memory
+# The boat at its printed size, 60 mm, for finest lines of 0.9 um: a 6.9 cm plate, 4.5 min.
+uv run --extra gpu holotrace benchy --plate 68.8128 --scale 35.2947 --spacing 48 --pixel 0.3 --cone 7.8
 # Wide plates: 0.25 um pixels, the scene's light within 35 degrees either way.
 uv run --extra gpu holotrace benchy --plate 20.48 --scale 6 --spacing 12 --turn 15 --pixel 0.25 --cone 35 --slab 300
 #   a 2 cm plate, the boat 1 cm long: about 4 min, the spectrum 13 GB on disk
@@ -78,6 +82,11 @@ uv run --extra gpu holotrace benchy --plate 40.96 --scale 16 --spacing 32 --pixe
 uv run --extra gpu holotrace view benchy --focus 0   # a movie: eye moving side to side, up and down
 uv run --extra gpu holotrace view NAME --eye 300     # ... seen by a real eye 30 cm away, 4 mm pupil
 uv run --extra gpu holotrace view NAME --eye 300 --source 0.02   # ... lit by a source 2 cm across, 1 m off: far less speckle
+uv run --extra gpu holotrace encode NAME            # the plate's pattern on its own pixels, clear or opaque (a PBM picture)
+uv run --extra gpu holotrace encode NAME --levels   # ... or in 256 levels, for a relief in resist (a PGM picture)
+uv run --extra gpu holotrace encode NAME --gds      # ... or the chrome's clear pixels as rectangles, in a GDSII file
+uv run --extra gpu holotrace encode NAME --check    # ... or both replayed: how much of the light becomes the scene's
+uv run --extra gpu holotrace testplate              # two small plates to try a writer on: thin lines, levels, small holograms
 uv run --extra gpu holotrace speckle    # step 4 (parked): phases optimized against speckle
 uv run --extra gpu holotrace gpucheck   # the GPU's sum against the CPU's
 ```

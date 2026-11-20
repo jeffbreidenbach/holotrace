@@ -17,6 +17,12 @@ Mitsuba traces the scene; the waves are summed separately.
                           --light laser or led: see viewer.py)
     holotrace compare NAME...
                           the scenes side by side, by laser and by LED
+    holotrace encode NAME the plate's pattern for a writer, on its own
+                          pixels: clear or opaque (a picture, or a GDSII
+                          file), or 256 levels (see encode.py)
+    holotrace testplate   two small plates to try a writer on: gratings,
+                          ladders of thin lines, a staircase of levels,
+                          small holograms (see testplate.py)
     holotrace speckle     step 4: the solid scene with each point's phase
                           optimized against speckle (GPU only; --check
                           checks its gradient)
@@ -115,6 +121,14 @@ def main() -> None:
         from .viewer import compare
 
         compare()
+    elif command == "encode":
+        from .encode import main as encode
+
+        encode()
+    elif command == "testplate":
+        from .testplate import main as testplate
+
+        testplate()
     elif command == "speckle":
         from .speckle import main as speckle
 
