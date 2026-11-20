@@ -18,9 +18,6 @@ writing by the manuals' rates) is for a later visit.
 
 ## Ask before going
 
-The answers may mean making the files again, which takes minutes but
-needs the computer with the GPU.
-
 We know there are three write heads, and the finest writes 0.9 µm. 
 There is a gray-scale option, of 256 levels in resist.
 
