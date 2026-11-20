@@ -9,7 +9,7 @@ manuals as other sites publish them (linked at the end).
 1. Learn how a hologram gets into the machine: which file, on which
    pixels.
 2. Write the chrome test plate.
-3. Write rgw relief test plate.
+3. Write the relief test plate.
 4. Bring home numbers: how wide the lines came out, how deep the
    levels.
 
