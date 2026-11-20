@@ -32,7 +32,9 @@ relief.pgm: 256 levels (see encode.py), 128 where there is nothing.
   (a whole wave, if the depths are right), teeth 6, 8, 12, 16, 24 and
   32 pixels wide, lying and standing: one with sharp teeth sends all
   its light into one first order.
-- Two holograms: at the widest angle W allows, and at 5 degrees.
+- Three holograms, as the chrome's: as encode.py makes it; bold, all
+  its fringes a whole wave deep, which has no shallow fringes (a writer
+  may not make those either) and shows the boat flat; and at 5 degrees.
 
 Each has its name beside it and the plate's own along the top, upright
 when the plate is: layout.txt says what each is and where, chrome.png
@@ -179,7 +181,9 @@ def main():
     ]
     relief = [
         [("R1", f"the boat, light within {widest:g} degrees", wide_px, wide_px, of_boat(wide_at, levels=True)),
-         ("R2", "the boat, light within 5 degrees", narrow_px, narrow_px, of_boat(narrow_at, levels=True))],
+         ("R2", f"the same, bold: every fringe a whole wave deep where the light thereabouts is a quarter of the "
+                f"brightest or more", wide_px, wide_px, of_boat(wide_at, bold=0.25, levels=True)),
+         ("R3", "the boat, light within 5 degrees", narrow_px, narrow_px, of_boat(narrow_at, levels=True))],
         [(f"S{1 + i}", f"level {i * 255 // (STEPS - 1)}", ladder, ladder,
           np.broadcast_to(np.uint8(i * 255 // (STEPS - 1)), (ladder, ladder))) for i in range(STEPS)],
         [(f"T{1 + i + 6 * (not lying)}", f"teeth {um(k)} wide, levels 0 to 255 across each, {'lying' if lying else 'standing'}",

@@ -1,7 +1,7 @@
 """The plate's pattern, as a writer would be given it.
 
     holotrace encode NAME [--pixel Q] [--levels | --gds] [--bold B]
-    holotrace encode NAME [--pixel Q] --check [--spot W]
+    holotrace encode NAME [--pixel Q] --check [--spot W] [--bold B]
 
 A scene's run keeps the plate's light as the eye can see it: sampled
 only every few pixels, and without the reference beam (solid.render). A
@@ -53,10 +53,11 @@ software takes: one structure, layer 1, the plate's middle at the
 origin, x to the viewer's right and y up, to the nm. It is 64 bytes a
 rectangle, so far bigger than the PBM.
 
-With --bold B (-bold in the files' names), the chrome's fringes are all
-half clear where the light's strength thereabouts is B or more, and
-there are none where it is less: no thin lines, for a writer to be
-tried on, but the scene comes out flat.
+With --bold B (-bold in the files' names), the fringes are all at their
+strongest where the light's strength thereabouts is B or more, the
+chrome's half clear and a relief's a whole wave deep, and there are
+none where it is less: no thin lines and no shallow fringes, for a
+writer to be tried on, but the scene comes out flat.
 
 --check replays both patterns instead, lit by the reference beam, over
 up to a hundred tiles spread across the plate: how much of the beam's
@@ -208,13 +209,10 @@ class Patterns:
         # strength from 0 to 1: one m deep sends on sinc(1 - m).
         m = np.linspace(0, 1, 4097)
         self.depth = cp.asarray(np.interp(np.linspace(0, 1, 1025), np.sinc(1 - m), m).astype(np.float32))
-        self.chrome = cp.ElementwiseKernel(
-            "complex64 light, complex64 beam, raw float32 strength, int32 cells, int32 wide, int32 x0, int32 y0, "
-            "float32 per, float32 bold",
-            "bool opaque",
-            """
-            // The light's strength thereabouts: between the four cells
-            // about this pixel.
+        # The light's strength thereabouts, a, at a pixel of a patch
+        # `wide` across: between the four cells about it.
+        where = "raw float32 strength, int32 cells, int32 wide, int32 x0, int32 y0, float32 per, float32 bold"
+        thereabouts = """
             float u = (x0 + (int)(i % wide) + 0.5f) * per - 0.5f, v = (y0 + (int)(i / wide) + 0.5f) * per - 0.5f;
             int u0 = (int)floorf(u), v0 = (int)floorf(v);
             float fu = u - u0, fv = v - v0;
@@ -222,6 +220,11 @@ class Patterns:
             int va = min(max(v0, 0), cells - 1), vb = min(max(v0 + 1, 0), cells - 1);
             float a = (1 - fv) * ((1 - fu) * strength[va * cells + ua] + fu * strength[va * cells + ub])
                 + fv * ((1 - fu) * strength[vb * cells + ua] + fu * strength[vb * cells + ub]);
+        """
+        self.chrome = cp.ElementwiseKernel(
+            "complex64 light, complex64 beam, " + where,
+            "bool opaque",
+            thereabouts + """
             if (bold > 0.0f) a = a >= bold ? 1.0f : 0.0f;
             complex<float> w = light * conj(beam);
             opaque = !(w.real() > sqrtf((w.real() * w.real() + w.imag() * w.imag()) * (1.0f - a * a)));
@@ -229,13 +232,19 @@ class Patterns:
             "holotrace_chrome",
         )
         self.relief = cp.ElementwiseKernel(
-            "complex64 light, complex64 beam, float32 dimmest, raw float32 depth",
+            "complex64 light, complex64 beam, float32 dimmest, raw float32 depth, " + where,
             "uint8 level",
             """
             complex<float> w = light * conj(beam);
-            float t = fminf(abs(w) * dimmest, 1.0f) * 1024.0f;
-            int k = min((int)t, 1023);
-            float m = depth[k] + (t - k) * (depth[k + 1] - depth[k]);
+            float m;
+            if (bold > 0.0f) {
+            """ + thereabouts + """
+                m = a >= bold ? 1.0f : 0.0f;
+            } else {
+                float t = fminf(abs(w) * dimmest, 1.0f) * 1024.0f;
+                int k = min((int)t, 1023);
+                m = depth[k] + (t - k) * (depth[k + 1] - depth[k]);
+            }
             int l = (int)((atan2f(w.imag(), w.real()) * 0.15915494f * m + 0.5f) * 256.0f);
             level = l > 255 ? 255 : (l < 0 ? 0 : l);
             """,
@@ -252,10 +261,10 @@ class Patterns:
         made = _finer(cp.asarray(_patch(self.light, y0, x0, size)), up)
         y = (y0 * up + np.arange(size * up) - self.n * up / 2 + 0.5) * self.pitch / up
         beam = _reference(y, self.sine)
+        where = (self.strength, self.cells, size * up, x0 * up, y0 * up, cp.float32(1 / (CELL * up)), cp.float32(self.bold))
         if levels:
-            return self.relief(made, beam, self.dimmest, self.depth)
-        return self.chrome(made, beam, self.strength, self.cells, size * up, x0 * up, y0 * up,
-                           cp.float32(1 / (CELL * up)), cp.float32(self.bold))
+            return self.relief(made, beam, self.dimmest, self.depth, *where)
+        return self.chrome(made, beam, *where)
 
     def core(self, y0, x0, levels):
         """The pattern of the tile whose first kept row and column are
@@ -420,7 +429,8 @@ def check(patterns, spot):
     per_side = -(-n // tile)
     step = -(-per_side // 10)
     some = range(step // 2, per_side, step)
-    kinds = ["chrome", f"chrome, written with a {spot:g} um spot", "relief", f"relief, written with a {spot:g} um spot"]
+    kinds = [kind + ", bold" * bool(patterns.bold) + with_spot for kind in ("chrome", "relief")
+             for with_spot in ("", f", written with a {spot:g} um spot")]
     out2, both, scene2, lit = np.zeros(4), np.zeros(4, complex), 0.0, 0
     for ty in some:
         for tx in some:

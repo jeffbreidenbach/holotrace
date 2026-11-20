@@ -932,9 +932,13 @@ on them named beside it (`layout.txt` says what and where):
   levels from 0 to 255 in squares 1 mm wide; twelve sawtooth gratings,
   teeth from 1.8 to 9.6 µm wide, a whole wave deep, lying and standing
   (one with sharp teeth of the right depth sends all its light into one
-  first order); and two holograms, at ±7.8° and ±5°.
+  first order); and three holograms, as the chrome's: as `encode
+  --levels` makes it; with every fringe a whole wave deep (`--bold`),
+  which has no shallow fringes (a writer may not make those, any more
+  than thin lines) and shows the boat flat; and with the light within
+  ±5°.
 
-Both take 48 s, after a minute for the holograms the first time.
+Both take 50 s, after a minute for the holograms the first time.
 Nothing has been printed.
 
 `chrome.png` and `relief.png` show the plates, each dot the mean of 48
@@ -955,9 +959,29 @@ the boat, the right way up (as drawn; no writer's spot):
 | Hologram | Of the beam, becomes the scene's light | Other light in the kept band, against that |
 |---|---|---|
 | H1, chrome, ±7.8° | 1.12% | 28% |
+| H2, chrome, ±7.8°, bold | 2.20% | 27% |
 | H3, chrome, ±5° | 1.10% | 18% |
 | R1, relief, ±7.8° | 5.48% | 7% |
-| R2, relief, ±5° | 5.52% | 3% |
+| R2, relief, ±7.8°, bold | 21.68% | 25% |
+| R3, relief, ±5° | 5.52% | 3% |
+
+The bold ones are brighter, and their other light is mostly their own
+flatness: they are set against the scene's light, which is not flat.
+What a spot 0.9 µm wide would make of the ±7.8° ones (`encode --check
+--spot 0.9`, with `--bold 0.25` for the bold; 25 tiles; the spot is a
+guess at the writer's, as in §6.6), the same two numbers:
+
+| Pattern | As drawn | Written with the spot |
+|---|---|---|
+| Chrome | 1.14%, 25% | 0.70%, 54% |
+| Chrome, bold | 2.32%, 26% | 2.34%, 29% |
+| Relief | 5.57%, 6% | 1.84%, 8% |
+| Relief, bold | 22.91%, 24% | 8.65%, 32% |
+
+Bold chrome is all but untouched by the spot, as it was made to be. A
+bold relief is not: it keeps 38% of its light, the relief proper 33%.
+So it stands in for the shallow fringes, not for what a spot does to a
+sawtooth's steep sides; the sawtooth gratings are there for that.
 
 ## 7. The viewer (`viewer.py`)
 
