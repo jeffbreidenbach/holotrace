@@ -5,7 +5,7 @@ the first plates holotrace has had printed. Nothing here has been tried
 on a machine yet.
 
 The writer is a Heidelberg laser beam writer, taken here to be a DWL
-66FS (not confirmed), whose owner puts its finest lines at about 0.9 µm.
+66FS (not confirmed), whose owner puts its finest lines at 0.9 µm.
 What this page says of the machine is from Heidelberg's manuals as
 other sites publish them (linked at the end). The owner's machine and
 habits may differ, and where they do, the owner's word goes.
@@ -30,33 +30,67 @@ this one finds out. Its files exist (DESIGN.md §6.7) and stay at home.
 The answers may mean making the files again, which takes minutes but
 needs the computer with the GPU.
 
+The owner has said this much. There are three write heads, and the
+finest writes 0.9 µm: said more than once, and the plates are made for
+it, the finest lines and gaps in their holograms being 0.9 µm wide.
+And there is a gray-scale option, of 256 levels in resist.
+
 1. **What file do you give the machine for a hologram that is clear or
    opaque?** The manual's converter takes GDSII, and the test plate is
    ready as one: 1.4 GB, 22.9 million rectangles. Will a file that size
    convert? Is there a limit to the number of shapes? (One site's rules
    allow a million corners in a whole design; Heidelberg's guide, a
    million to a polygon.)
-2. **And for one of many levels?** Which format, how many levels, on
-   which pixels, and which way round (does the highest value leave the
-   most resist, or the least)? The manual offers only a drawing with a
-   layer for each of 128 levels, or pictures of at most 1000 × 1000
-   pixels repeated across the plate. Neither looks able to hold a
-   hologram, so there is probably another way.
-3. **Which write head and mode, and what are its pixels?** For the 4 mm
-   head one site gives 400 nm, or 200 nm in its finer mode. A relief's
-   picture ends up on the machine's own pixels (or twice or four times
-   them), so it is best made on them; the chrome's rectangles need not
-   be.
-4. **Which plates?** Their size; for the relief, which resist, how
-   thick, and how much it slows light (its index at 633 nm), if known.
-5. **How should the files come?** A drive (formatted how?) or over a
-   network. A sample of a file that worked would settle the first three
-   questions at once.
-6. **What is there to look with?** A red laser (best a He–Ne, 633 nm)
-   wide enough to cover 9 mm, a power meter, a microscope, the Zygo.
-7. **How long is the visit, and how long do developing and etching
-   take?** Each test plate is 38 minutes to 2.4 hours of writing, by
-   the manuals' rates for its area alone.
+2. **Can the gray-scale option take one large picture, and in which
+   format?** A hologram of many levels is a picture with a level from 0
+   to 255 at every pixel: 7,000 pixels square for the small boat,
+   28,672 square for one hologram of the test plate, 92,909 × 53,876
+   for the whole plate (on 0.3 µm pixels). It is ready as a PGM, and
+   can be written in whatever format is wanted.
+
+   GDSII is not likely to be the answer. It says where there is a shape
+   and where there is none, and the manual's converter takes it only
+   for plates of that kind. For gray scale the manual has two ways in.
+   One is a drawing (DXF) with a layer for each level, which does not
+   suit a hologram: the small boat alone would be 17.4 million
+   rectangles, against 0.6 million as chrome. The other is a picture
+   (BMP), but of at most 1000 × 1000 pixels, repeated across the plate.
+   So what to find out is whether this machine's software takes a
+   bigger picture than the manual's does.
+
+   Two more go with it. Which way round are the levels: does 255 leave
+   the most resist, or the least? And is there a gray-scale file that
+   has worked, with the settings it was converted with? It would answer
+   this whole question, and the next.
+3. **Are the finest head's pixels 0.2 µm, and if not, what are they?**
+   The machine writes a plate as rows of points, its pixels, with a
+   spot wider than the points are apart. The 0.9 µm is what the spot
+   can make; the pixels are finer. One site gives its 4 mm head two
+   modes: pixels of 0.4 µm, with features and spaces down to 1.5 µm,
+   or pixels of 0.2 µm, with features and spaces down to 1 µm. Lines
+   and gaps of 0.9 µm point to the finer one. A gray-scale picture is
+   put onto these pixels (or onto pixels twice or four times as big),
+   so a hologram's picture is best made on them from the start, with
+   nothing left for the converter to work out between its pixels and
+   ours. The test plates are ready on 0.2, 0.3 and 0.4 µm. The chrome
+   plate does not depend on the answer: the converter lays its
+   rectangles on the machine's pixels itself.
+
+One thing is to tell, not to ask, since it changes nothing in the
+files: **the relief needs a clear plate, with resist on it more than
+1.1 µm thick.** The picture's whole range is to come out one wave of
+red light deep, 0.633 µm / (n − 1): about 1.06 µm in a resist that
+slows light 1.6 times (n; with the resist's name it can be looked up).
+One site's chrome plates carry about 0.5 µm of resist, too little, and
+their chrome would stop the light. Making the depth come out right is a
+matter of exposure, which is the owner's; the staircase on the plate
+measures it.
+
+Left for the visit: how the files come (a drive, formatted how, or a
+network), what there is to look with (a red laser, best a He–Ne at
+633 nm, wide enough to cover 9 mm; a power meter; a microscope; the
+Zygo), and how long things take (each test plate is 38 minutes to 2.4
+hours of writing, by the manuals' rates for its area alone).
 
 ## Take
 
@@ -79,7 +113,7 @@ they are in `/mnt/holoscratch/prints`:
 | `testplate-0.4um` | the same | 0.4 µm | 1.01 GB | 1.2 MB | 0.34 GB | 2.62 GB |
 
 Three sizes of pixel because the machine's own are not known (question
-3). For chrome, take `testplate`. For the relief, whichever matches.
+3; 0.2 µm is the likeliest). For chrome, take `testplate`. For the relief, whichever matches.
 The three are not the same test: every line and tooth is a whole
 number of pixels, so their widths differ (each `layout.txt` says).
 
@@ -108,7 +142,7 @@ What the files mean:
 - `relief.pgm`: a byte a pixel, top row first. The value is how far
   the pixel holds the light back, in 256ths of a wave: more is more
   resist. 128 where there is nothing. All 256 make one wave: in resist
-  that slows light 1.6 times (a guess, see question 4) that is 1.06 µm
+  that slows light 1.6 times (a guess until the resist is named) that is 1.06 µm
   from lowest to highest (633 nm / 0.6).
 
 ## The plates
@@ -299,8 +333,10 @@ The way in is question 2. With it answered:
    the picture has to be inverted, there or at home.
 3. **How deep.** The whole range is to come out one wave deep: about
    1.06 µm if the resist slows light 1.6 times, 0.99 µm for 1.64. The
-   machine has 128 levels by the manual; the file's 256 are then taken
-   two to one.
+   owner gives the machine 256 levels, as many as the file has. The
+   manual's converter speaks of 128, and would take the file's two to
+   one; Heidelberg's sheet for the newer DWL 66+ gives 128 to a basic
+   gray-scale mode and 255 to an advanced one.
 4. **If the manual's two ways are all there is**, the holograms
    probably cannot be written, but the staircase and the sawteeth can: each repeats, so
    each can be a picture of at most 1000 × 1000 pixels stepped over its
@@ -373,6 +409,9 @@ are copied into `boat` as `boat.pbm`, `boat.pgm` and `boat.gds`.
 - [Conversion Job Manager software guide, v1.88 for the DWL66fs](https://nrf.aux.eng.ufl.edu/_files/documents/133.pdf)
   (Heidelberg Instruments, hosted by the University of Florida): the
   formats, inverting, the 128 levels, the pictures of 1000 × 1000.
+- [DWL 66+ specifications](https://www.nanofab.utah.edu/wp-content/uploads/2022/12/DWL-66-Specs.pdf)
+  (Heidelberg Instruments, 2019, hosted by the University of Utah): the
+  newer model's gray-scale modes, of 128, 255 and 1000 levels.
 - [DWL66fs User Guide 1](https://www.cnfusers.cornell.edu/sites/default/files/Equipment-Resources/DWL66fs_UG1_User_Guide_1.pdf)
   and [User Guide 2](https://www.cnfusers.cornell.edu/sites/default/files/Equipment-Resources/DWL66fs_UG2_User_Guide_2.pdf)
   (Heidelberg Instruments, hosted by Cornell).
