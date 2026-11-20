@@ -1,39 +1,28 @@
-# A first visit to the Heidelberg laser writer
-
-What to ask, what to take, what to write, and what to bring home, for
-the first plates holotrace has had printed. Nothing here has been tried
-on a machine yet.
+# Using the Heidelberg laser writer
 
 The writer is a Heidelberg laser beam writer, taken here to be a DWL
-66FS (not confirmed), whose owner puts its finest lines at 0.9 µm.
-What this page says of the machine is from Heidelberg's manuals as
-other sites publish them (linked at the end). The owner's machine and
-habits may differ, and where they do, the owner's word goes.
+66FS, with finest lines of 0.9 µm. This information is from Heidelberg's
+manuals as other sites publish them (linked at the end).
 
-## What the visit is for
+## Goals
 
-1. To learn how a hologram gets into the machine: which file, on which
-   pixels. It is the one thing that can stop everything, and it is not
-   known.
-2. To write the chrome test plate and look at it.
-3. If there is a way in for a relief of many levels, to write the
-   relief test plate too.
-4. To bring home numbers: how wide the lines came out, how deep the
+1. Learn how a hologram gets into the machine: which file, on which
+   pixels.
+2. Write the chrome test plate.
+3. Write a relief test plate.
+4.  Bring home numbers: how wide the lines came out, how deep the
    levels.
 
 The boat at its printed size (a 68.8 mm plate, 6.5 to 24 hours of
-writing by the manuals' rates) is for a later visit, made with what
-this one finds out. Its files exist (DESIGN.md §6.7) and stay at home.
+writing by the manuals' rates) is for a later visit.
 
 ## Ask before going
 
 The answers may mean making the files again, which takes minutes but
 needs the computer with the GPU.
 
-The owner has said this much. There are three write heads, and the
-finest writes 0.9 µm: said more than once, and the plates are made for
-it, the finest lines and gaps in their holograms being 0.9 µm wide.
-And there is a gray-scale option, of 256 levels in resist.
+We know there are three write heads, and the finest writes 0.9 µm. 
+There is a gray-scale option, of 256 levels in resist.
 
 1. **What file do you give the machine for a hologram that is clear or
    opaque?** The manual's converter takes GDSII, and the test plate is
@@ -76,10 +65,9 @@ And there is a gray-scale option, of 256 levels in resist.
    plate does not depend on the answer: the converter lays its
    rectangles on the machine's pixels itself.
 
-One thing is to tell, not to ask, since it changes nothing in the
-files: **the relief needs a clear plate, with resist on it more than
-1.1 µm thick.** The picture's whole range is to come out one wave of
-red light deep, 0.633 µm / (n − 1): about 1.06 µm in a resist that
+One thing to confirm: **the relief needs a clear plate, with resist on
+it more than 1.1 µm thick.** The picture's whole range is to come out one
+wave of red light deep, 0.633 µm / (n − 1): about 1.06 µm in a resist that
 slows light 1.6 times (n; with the resist's name it can be looked up).
 One site's chrome plates carry about 0.5 µm of resist, too little, and
 their chrome would stop the light. Making the depth come out right is a
@@ -92,7 +80,7 @@ network), what there is to look with (a red laser, best a He–Ne at
 Zygo), and how long things take (each test plate is 38 minutes to 2.4
 hours of writing, by the manuals' rates for its area alone).
 
-## Take
+## Bring
 
 - The files, 25 GB of them, on a drive of 32 GB or more. Not FAT32: it
   cannot hold a file over 4 GB.
