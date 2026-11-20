@@ -396,7 +396,8 @@ def sum_planes(points, light, phases, size, kept=None):
         groups.append((plane, mine, seen_from, margin, bounds))
     deepest = max(m for _, _, _, m, _ in groups)
     tile = min(n, (GPU_PATCH - 2 * deepest) // 256 * 256)
-    if tile < 1024:
+    # (A plate of fewer than 1024 kept pixels is one tile, however small.)
+    if tile < min(n, 1024):
         raise ValueError("too deep a scene to carry tile by tile: see planes.py")
 
     if kept is None:

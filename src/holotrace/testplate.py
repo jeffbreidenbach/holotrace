@@ -1,13 +1,17 @@
 """Test plates: what a writer makes of fine lines and of levels, found
 out before a whole plate is given to it.
 
-    holotrace testplate [--line W]
+    holotrace testplate [--line W] [--pixel Q]
 
 writes into out/testplate the patterns of two small plates, for a
 writer whose finest lines are thought to be W um wide (default 0.9), on
-pixels a third of that:
+pixels a third of that (or, for a writer with pixels of its own, Q um:
+into out/testplate-<Q>um, the holograms' finest fringes still two lines
+wide):
 
-chrome.pbm, chrome.gds: clear or opaque (see encode.py for the files).
+chrome.pbm, chrome.gds: clear or opaque (see encode.py for the files);
+and chrome_lines.gds, the same plate without its holograms, which are
+nearly all of its rectangles.
 
 - Gratings, 2 mm square: lines 2, 3, 4, 5, 6 and 8 pixels wide and as
   far apart, lying (as a hologram's fringes do) and standing. Lit by a
@@ -122,11 +126,11 @@ def main():
     import cupy as cp
 
     line = _option("--line", 0.9)
-    pixel = line / 3
+    pixel = _option("--pixel", line / 3)
     nm = round(1000 * pixel)
     if abs(nm - 1000 * pixel) > 1e-6:
-        sys.exit("the pixels, a third of --line, must be a whole number of nm")
-    out = results() / "testplate"
+        sys.exit("the pixels (--pixel, or a third of --line) must be a whole number of nm")
+    out = results() / ("testplate" if "--pixel" not in sys.argv else f"testplate-{pixel:g}um")
     out.mkdir(parents=True, exist_ok=True)
     start = time.time()
     # The widest angle whose finest fringes (see Optics.wide) are two
@@ -244,16 +248,25 @@ def main():
                         picture[part] = deep[part].clip(0, 255)
         Image.fromarray((picture if levels else 255 * picture).astype(np.uint8)).save(out / f"{plate}.png")
         said = f"{plate}: {wide} x {high} pixels {pixel:g} um apart, {wide * pixel / 1000:.1f} x {high * pixel / 1000:.1f} mm"
-        if not levels:
-            gds = encode.Gds(out / "chrome.gds")
+        # chrome.gds, and chrome_lines.gds, the plate without its
+        # holograms: hundreds of times fewer rectangles, in case a
+        # writer's software will not take so many.
+        for name in () if levels else ("chrome.gds", "chrome_lines.gds"):
+            if name == "chrome_lines.gds":
+                for row in rows:
+                    for thing, _, w, h, paint in row:
+                        if callable(paint):
+                            x, y = places[thing]
+                            made[y : y + h, x : x + w] = False
+            gds = encode.Gds(out / name)
             for bottom in range(0, high, band):
                 a, b, r0, r1 = (cp.asnumpy(v).astype(np.int64) for v in encode.runs(cp.asarray(made[bottom : bottom + band])))
                 gds.add(a * nm - wide * nm // 2, b * nm - wide * nm // 2,
                         (bottom + r0) * nm - high * nm // 2, (bottom + r1) * nm - high * nm // 2)
             gds.close()
-            said += f"; chrome.gds, {gds.count} rectangles, {(out / 'chrome.gds').stat().st_size / 2**30:.2f} GB"
+            said += f"; {name}, {gds.count} rectangles, {(out / name).stat().st_size / 2**30:.3f} GB"
         planes._remove(made)
         del made
         print(f"{said}: {time.time() - start:.1f} s", flush=True)
     (out / "layout.txt").write_text("\n".join(legend) + "\n")
-    print(f"wrote {out}/chrome.pbm, chrome.gds, relief.pgm, their pictures and layout.txt")
+    print(f"wrote {out}/chrome.pbm, chrome.gds, chrome_lines.gds, relief.pgm, their pictures and layout.txt")

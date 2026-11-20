@@ -928,7 +928,7 @@ on them named beside it (`layout.txt` says what and where):
     every fringe half clear (`--bold`), which has no thin lines and
     shows the boat flat; and with the light within ±5°, its fringes
     coarser.
-- **Relief** (27.9 × 16.2 mm; PGM 4.8 GB): a staircase of sixteen
+- **Relief** (27.9 × 16.2 mm; PGM 4.7 GB): a staircase of sixteen
   levels from 0 to 255 in squares 1 mm wide; twelve sawtooth gratings,
   teeth from 1.8 to 9.6 µm wide, a whole wave deep, lying and standing
   (one with sharp teeth of the right depth sends all its light into one
@@ -938,7 +938,7 @@ on them named beside it (`layout.txt` says what and where):
   than thin lines) and shows the boat flat; and with the light within
   ±5°.
 
-Both take 50 s, after a minute for the holograms the first time.
+Both take 57 s, after a minute for the holograms the first time.
 Nothing has been printed.
 
 `chrome.png` and `relief.png` show the plates, each dot the mean of 48
@@ -982,6 +982,42 @@ Bold chrome is all but untouched by the spot, as it was made to be. A
 bold relief is not: it keeps 38% of its light, the relief proper 33%.
 So it stands in for the shallow fringes, not for what a spot does to a
 sawtooth's steep sides; the sawtooth gratings are there for that.
+
+**A writer's own pixels.** The manuals give this writer's pixels as
+200 or 400 nm, by its mode, and a relief's picture ends up on them
+(`docs/heidelberg-laser-writer.md`). `testplate --pixel Q` makes the plates on
+pixels of Q µm, into `testplate-<Q>um`, the holograms' finest fringes
+still two lines wide; every line and tooth is a whole number of pixels,
+so their widths change with Q. Made for 0.2 and 0.4 µm as well, the
+±7.8° boat replayed on each (`encode --check --spot 0.9`, 25 tiles; the
+same two numbers, as drawn and written with the spot):
+
+| Pixels | The plates, in all | `chrome.gds` | `relief.pgm` | Chrome | Relief |
+|---|---|---|---|---|---|
+| 0.2 µm | 2.7 min after the holograms, 18.6 GB of memory at most | 35.7 million rectangles, 2.13 GB | 10.5 GB | 1.12%, 20%; 0.72%, 46% | 5.49%, 5%; 1.79%, 7% |
+| 0.3 µm | 57 s after the holograms | 22.9 million, 1.37 GB | 4.7 GB | 1.14%, 25%; 0.70%, 54% | 5.57%, 6%; 1.84%, 8% |
+| 0.4 µm | 32 s after the holograms | 17.0 million, 1.01 GB | 2.6 GB | 1.05%, 27%; 0.66%, 61% | 5.18%, 8%; 1.72%, 10% |
+
+Each `chrome.gds`, drawn again by the separate reader, is its
+`chrome.pbm` pixel for pixel.
+
+**A count of shapes.** One site's rules for this writer allow a
+million corners in a whole design (Heidelberg's own guide: a million to
+a polygon), and `chrome.gds` has 92 million, four to a rectangle.
+Nearly all are the holograms'. So `testplate` also writes
+`chrome_lines.gds`, the plate without its holograms: 30,455 rectangles
+at 0.3 µm pixels (1.9 MB), 61,262 at 0.2 µm, 18,957 at 0.4 µm. The
+separate reader finds each to be exactly `chrome.gds`'s rectangles but
+for those within the holograms.
+
+**A boat to try the way in with**: a plate 2.1 mm wide (`benchy --plate
+2.1 --scale 1.025 --spacing 16 --pixel 0.3 --cone 7.8`, 2.4 s), its
+GDSII file 611,048 rectangles and 37 MB, its PGM 47 MB. So small a
+plate, of fewer than 1024 kept pixels, was refused as "too deep a scene
+to carry tile by tile": a slip in `solid.sum_planes`, mended.
+
+`docs/heidelberg-laser-writer.md` is what to ask, take, write and measure on a
+first visit to the writer.
 
 ## 7. The viewer (`viewer.py`)
 
@@ -1216,6 +1252,7 @@ both, from two eye positions 30 cm away:
 | `encode.py` | The plate's pattern on a writer's pixels, clear or opaque (a picture, or a GDSII file) or in 256 levels, and a replay of it (§6.6, §6.7). |
 | `testplate.py` | Two small plates to try a writer on: gratings, ladders of thin lines, a staircase of levels, small holograms (§6.7). |
 | `speckle.py` | Parked phase optimization against speckle (§8.1). |
+| `docs/heidelberg-laser-writer.md` | Not code: what to ask, take, write and measure on a first visit to a laser writer, with the test plates (§6.7). |
 
 Output names encode the settings, for example
 `out/benchy-40.96mm-32um-35deg-0.25um-boat16`: plate width, point
