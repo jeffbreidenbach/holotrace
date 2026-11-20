@@ -934,8 +934,30 @@ on them named beside it (`layout.txt` says what and where):
   (one with sharp teeth of the right depth sends all its light into one
   first order); and two holograms, at ±7.8° and ±5°.
 
-Both take 53 s, after a minute for the holograms the first time.
+Both take 48 s, after a minute for the holograms the first time.
 Nothing has been printed.
+
+`chrome.png` and `relief.png` show the plates, each dot the mean of 48
+pixels each way. For chrome that is how much is clear, and the boats
+show, since where the scene is brighter more is clear. A relief's
+fringes are as much above level 128 as below it however deep they are,
+so their mean is flat gray (the first `relief.png` showed no boats at
+all). `relief.png` therefore shows a thing with fringes by how deep
+they are, white for teeth of all 256 levels, and a flat thing by its
+level.
+
+The plates' files were read back. `chrome.gds`, its 22,910,712
+rectangles drawn again by a separate reader, is `chrome.pbm` pixel for
+pixel. And the holograms, cut out of `chrome.pbm` and `relief.pgm`
+where `layout.txt` says they are and lit by the reference beam, show
+the boat, the right way up (as drawn; no writer's spot):
+
+| Hologram | Of the beam, becomes the scene's light | Other light in the kept band, against that |
+|---|---|---|
+| H1, chrome, ±7.8° | 1.12% | 28% |
+| H3, chrome, ±5° | 1.10% | 18% |
+| R1, relief, ±7.8° | 5.48% | 7% |
+| R2, relief, ±5° | 5.52% | 3% |
 
 ## 7. The viewer (`viewer.py`)
 

@@ -36,8 +36,12 @@ relief.pgm: 256 levels (see encode.py), 128 where there is nothing.
 
 Each has its name beside it and the plate's own along the top, upright
 when the plate is: layout.txt says what each is and where, chrome.png
-and relief.png show the plates. The holograms are made first, as
-benchy makes them, into out/testplate too.
+and relief.png show the plates. chrome.png is how much of each small
+part is clear. relief.png is each small part's level, but where there
+are fringes how deep they are: a relief's fringes are as much above
+level 128 as below, so their mean would show a hologram as flat gray.
+The holograms are made first, as benchy makes them, into out/testplate
+too.
 """
 
 import math
@@ -204,18 +208,36 @@ def main():
                 word = letters(name, dot)
                 made[y - gap // 4 - word.shape[0] : y - gap // 4, x : x + word.shape[1]][word] = ink
                 legend.append(f"  {name:4s} {x * pixel / 1000:7.3f} {y * pixel / 1000:7.3f}  {w * pixel / 1000:.3f} mm square  {what}")
-        # The files: rows from the top down; a PBM's black is opaque.
-        band = 2048
-        small = []
+        # The files: rows from the top down; a PBM's black is opaque. The
+        # picture: the mean of every `step` pixels each way, and for a
+        # relief how far their levels spread about it.
+        step = 48
+        band = 43 * step
+        small, spread = [], []
         with open(out / f"{plate}.{'pgm' if levels else 'pbm'}", "wb") as f:
             f.write(f"P5\n{wide} {high}\n255\n".encode() if levels else f"P4\n{wide} {high}\n".encode())
             for top in range(high, 0, -band):
                 rows_ = np.asarray(made[max(top - band, 0) : top][::-1])
                 f.write(rows_.tobytes() if levels else np.packbits(~rows_, axis=1).tobytes())
-                step = 48
-                cut = rows_[: len(rows_) // step * step, : wide // step * step]
-                small.append(cut.reshape(len(cut) // step, step, wide // step, step).mean(axis=(1, 3)))
+                cut = rows_[: len(rows_) // step * step, : wide // step * step].astype(np.float32)
+                cut = cut.reshape(len(cut) // step, step, wide // step, step)
+                small.append(cut.mean(axis=(1, 3)))
+                if levels:
+                    spread.append(cut.std(axis=(1, 3)))
         picture = np.concatenate(small)
+        if levels:
+            # A relief's fringes are as much above level 128 as below it,
+            # whatever their depth: their mean shows nothing. So a thing
+            # with fringes is shown by how deep they are, white for teeth
+            # of all 256 levels (which spread 256 / sqrt(12)), black for
+            # none; a flat one by its level, as the plate around is.
+            deep = np.concatenate(spread) * (255 * math.sqrt(12) / 256)
+            for row in rows:
+                for name, _, w, h, _ in row:
+                    x, y = places[name]
+                    part = np.s_[-((y + h - high) // step) : (high - y) // step, -(-x // step) : (x + w) // step]
+                    if deep[part].any():
+                        picture[part] = deep[part].clip(0, 255)
         Image.fromarray((picture if levels else 255 * picture).astype(np.uint8)).save(out / f"{plate}.png")
         said = f"{plate}: {wide} x {high} pixels {pixel:g} um apart, {wide * pixel / 1000:.1f} x {high * pixel / 1000:.1f} mm"
         if not levels:
